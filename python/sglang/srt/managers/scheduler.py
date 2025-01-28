@@ -78,7 +78,8 @@ from sglang.srt.managers.schedule_policy import (
     SchedulePolicy,
 )
 from sglang.srt.managers.session_controller import Session
-from sglang.srt.managers.tp_worker import TpModelWorker
+# from sglang.srt.managers.tp_worker import TpModelWorker
+from sglang.srt.managers.hpu_tp_worker import HPUTPWorker as TpModelWorker
 from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
 from sglang.srt.managers.utils import validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
@@ -237,11 +238,8 @@ class Scheduler:
             TpWorkerClass = TpModelWorker
 
         self.tp_worker = TpWorkerClass(
+            model_path=server_args.model_path,
             server_args=server_args,
-            gpu_id=gpu_id,
-            tp_rank=tp_rank,
-            dp_rank=dp_rank,
-            nccl_port=port_args.nccl_port,
         )
 
         # Launch a worker for speculative decoding if needed
@@ -273,16 +271,16 @@ class Scheduler:
             _,
             _,
         ) = self.tp_worker.get_worker_info()
-        self.tp_cpu_group = self.tp_worker.get_tp_cpu_group()
-        self.attn_tp_cpu_group = self.tp_worker.get_attention_tp_cpu_group()
-        self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
-        global_server_args_dict.update(worker_global_server_args_dict)
-        set_random_seed(self.random_seed)
+        # self.tp_cpu_group = self.tp_worker.get_tp_cpu_group()
+        # self.attn_tp_cpu_group = self.tp_worker.get_attention_tp_cpu_group()
+        # self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
+        # global_server_args_dict.update(worker_global_server_args_dict)
+        # set_random_seed(self.random_seed)
         # Print debug info
         logger.info(
-            f"max_total_num_tokens={self.max_total_num_tokens}, "
-            f"max_prefill_tokens={self.max_prefill_tokens}, "
-            f"max_running_requests={self.max_running_requests}, "
+            # f"max_total_num_tokens={self.max_total_num_tokens}, "
+            # f"max_prefill_tokens={self.max_prefill_tokens}, "
+            # f"max_running_requests={self.max_running_requests}, "
             f"context_len={self.model_config.context_len}"
         )
 
@@ -321,9 +319,9 @@ class Scheduler:
         self.spec_num_total_forward_ct = 0
         self.last_decode_stats_tic = time.time()
         self.stream_interval = server_args.stream_interval
-        self.current_stream = torch.get_device_module(self.device).current_stream()
-        if self.device == "cpu":
-            self.current_stream.synchronize = lambda: None  # No-op for CPU
+        # self.current_stream = torch.get_device_module(self.device).current_stream()
+        # if self.device == "cpu":
+        #     self.current_stream.synchronize = lambda: None  # No-op for CPU
 
         # Session info
         self.sessions: Dict[str, Session] = {}
@@ -437,6 +435,8 @@ class Scheduler:
             ]
         )
 
+        logger.info(f"------------------ scheduler init done ------------------", extra={"color": "green"})
+
     def watchdog_thread(self):
         """A watch dog thread that will try to kill the server itself if one batch takes too long."""
         self.watchdog_last_forward_ct = 0
@@ -519,6 +519,7 @@ class Scheduler:
 
     def recv_requests(self) -> List[Req]:
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
+        time.sleep(1)
         if self.attn_tp_rank == 0:
             recv_reqs = []
 
@@ -1146,10 +1147,10 @@ class Scheduler:
                     req.output_ids.append(next_token_id)
                     req.check_finished()
 
-                    if req.finished():
-                        self.tree_cache.cache_finished_req(req)
-                    elif not batch.decoding_reqs or req not in batch.decoding_reqs:
-                        self.tree_cache.cache_unfinished_req(req)
+                    # if req.finished():
+                    #     self.tree_cache.cache_finished_req(req)
+                    # elif not batch.decoding_reqs or req not in batch.decoding_reqs:
+                    #     self.tree_cache.cache_unfinished_req(req)
 
                     if req.return_logprob:
                         logprob_pt += self.add_logprob_return_values(
@@ -1217,7 +1218,7 @@ class Scheduler:
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()
 
-        self.token_to_kv_pool.free_group_begin()
+        # self.token_to_kv_pool.free_group_begin()
 
         # Check finish condition
         for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
@@ -1236,7 +1237,8 @@ class Scheduler:
             req.check_finished()
 
             if req.finished():
-                self.tree_cache.cache_finished_req(req)
+                # self.tree_cache.cache_finished_req(req)
+                self.req_to_token_pool.free(req.req_pool_idx)
 
             if req.return_logprob:
                 req.output_token_logprobs_val.append(next_token_logprobs[i])
@@ -1260,7 +1262,7 @@ class Scheduler:
 
         self.stream_output(batch.reqs, batch.return_logprob)
 
-        self.token_to_kv_pool.free_group_end()
+        # self.token_to_kv_pool.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
         if (

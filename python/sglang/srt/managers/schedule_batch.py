@@ -620,7 +620,7 @@ class ScheduleBatch:
             return_logprob=any(req.return_logprob for req in reqs),
             has_stream=any(req.stream for req in reqs),
             has_grammar=any(req.grammar for req in reqs),
-            device=req_to_token_pool.device,
+            device="cpu",
             spec_algorithm=spec_algorithm,
             enable_custom_logit_processor=enable_custom_logit_processor,
         )
@@ -640,26 +640,19 @@ class ScheduleBatch:
             )
         return req_pool_indices
 
-    def alloc_token_slots(self, num_tokens: int):
-        out_cache_loc = self.token_to_kv_pool.alloc(num_tokens)
-
-        if out_cache_loc is None:
-            if self.tree_cache is not None:
-                self.tree_cache.evict(num_tokens, self.token_to_kv_pool.free)
-                out_cache_loc = self.token_to_kv_pool.alloc(num_tokens)
-
-            if out_cache_loc is None:
-                phase_str = "Prefill" if self.forward_mode.is_extend() else "Decode"
-                logger.error(
-                    f"{phase_str} out of memory. Try to lower your batch size.\n"
-                    f"Try to allocate {num_tokens} tokens.\n"
-                    f"Avaliable tokens: {self.token_to_kv_pool.available_size() + self.tree_cache.evictable_size()}\n"
-                )
-                if self.tree_cache is not None:
-                    self.tree_cache.pretty_print()
-                exit(1)
-
+    def alloc_token_slots_decode(self, reqs: List[Req]):
+        # print("alloc_token_slots_decode: ", reqs)
+        rids = [req.req_pool_idx for req in reqs]
+        out_cache_loc = self.token_to_kv_pool.alloc_decode(rids)
+        # print("out_cache_loc: ", out_cache_loc)
         return out_cache_loc
+
+    def alloc_token_slots_prefill(self, reqs: List[Req], extend_lens: List[int]):
+        # print("alloc_token_slots_prefill: ", reqs, extend_lens)
+        req_id_len_pairs = [(req.req_pool_idx, extend_lens[i]) for i, req in enumerate(reqs)]
+        out_cache_loc = self.token_to_kv_pool.alloc_prefill(req_id_len_pairs)
+        # print("out_cache_loc: ", out_cache_loc)
+        return torch.tensor(out_cache_loc, dtype=torch.int32).to(self.device, non_blocking=True)
 
     def prepare_encoder_info_extend(self, input_ids: List[int], seq_lens: List[int]):
         self.encoder_lens_cpu = []
@@ -738,13 +731,13 @@ class ScheduleBatch:
         bs = len(self.reqs)
         reqs = self.reqs
         input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
-        extend_num_tokens = sum(len(ids) for ids in input_ids)
+        extend_lens = [len(ids) for ids in input_ids]
+        extend_num_tokens = sum(extend_lens)
         seq_lens = []
         pre_lens = []
 
         # Allocate memory
         req_pool_indices = self.alloc_req_slots(bs)
-        out_cache_loc = self.alloc_token_slots(extend_num_tokens)
 
         input_embeds = []
 
@@ -784,6 +777,7 @@ class ScheduleBatch:
             req.is_retracted = False
             pre_lens.append(pre_len)
 
+        out_cache_loc = self.alloc_token_slots_prefill(reqs, extend_lens)
         # Set fields
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int32).to(
             self.device, non_blocking=True
@@ -817,24 +811,24 @@ class ScheduleBatch:
         extend_lens = torch.tensor(self.extend_lens, dtype=torch.int32).to(
             self.device, non_blocking=True
         )
-        if global_server_args_dict["attention_backend"] != "torch_native":
-            write_req_to_token_pool_triton[(bs,)](
-                self.req_to_token_pool.req_to_token,
-                self.req_pool_indices,
-                pre_lens,
-                self.seq_lens,
-                extend_lens,
-                self.out_cache_loc,
-                self.req_to_token_pool.req_to_token.shape[1],
-            )
-        else:
-            pt = 0
-            for i in range(bs):
-                self.req_to_token_pool.write(
-                    (self.req_pool_indices[i], slice(pre_lens[i], self.seq_lens[i])),
-                    self.out_cache_loc[pt : pt + self.extend_lens[i]],
-                )
-                pt += self.extend_lens[i]
+        # if global_server_args_dict["attention_backend"] != "torch_native":
+        #     write_req_to_token_pool_triton[(bs,)](
+        #         self.req_to_token_pool.req_to_token,
+        #         self.req_pool_indices,
+        #         pre_lens,
+        #         self.seq_lens,
+        #         extend_lens,
+        #         self.out_cache_loc,
+        #         self.req_to_token_pool.req_to_token.shape[1],
+        #     )
+        # else:
+        #     pt = 0
+        #     for i in range(bs):
+        #         self.req_to_token_pool.write(
+        #             (self.req_pool_indices[i], slice(pre_lens[i], self.seq_lens[i])),
+        #             self.out_cache_loc[pt : pt + self.extend_lens[i]],
+        #         )
+        #         pt += self.extend_lens[i]
         # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
 
         if self.model_config.is_encoder_decoder:
@@ -857,7 +851,6 @@ class ScheduleBatch:
 
         input_ids = torch.cat([self.input_ids, running_batch.input_ids])
         out_cache_loc = torch.cat([self.out_cache_loc, running_batch.out_cache_loc])
-
         self.merge_batch(running_batch)
         self.input_ids = input_ids
         self.out_cache_loc = out_cache_loc
@@ -1046,7 +1039,7 @@ class ScheduleBatch:
 
         # Alloc mem
         bs = len(self.reqs)
-        self.out_cache_loc = self.alloc_token_slots(bs)
+        self.out_cache_loc = self.alloc_token_slots_decode(self.reqs)
 
         if self.model_config.is_encoder_decoder:
             locs = self.encoder_lens + self.seq_lens
@@ -1056,15 +1049,15 @@ class ScheduleBatch:
 
         if self.enable_overlap:
             # Do not use in-place operations in the overlap mode
-            self.req_to_token_pool.write(
-                (self.req_pool_indices, locs), self.out_cache_loc
-            )
+            # self.req_to_token_pool.write(
+            #     (self.req_pool_indices, locs), self.out_cache_loc
+            # )
             self.seq_lens = self.seq_lens + 1
         else:
             # A faster in-place version
-            self.req_to_token_pool.write(
-                (self.req_pool_indices, locs), self.out_cache_loc
-            )
+            # self.req_to_token_pool.write(
+            #     (self.req_pool_indices, locs), self.out_cache_loc
+            # )
             self.seq_lens.add_(1)
         self.seq_lens_sum += bs
 
