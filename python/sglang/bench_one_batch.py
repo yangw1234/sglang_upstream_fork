@@ -42,6 +42,7 @@ The capital of the
 I'm going to the park
 """
 
+import habana_frameworks.torch.core as htcore
 import argparse
 import dataclasses
 import itertools
@@ -54,6 +55,7 @@ from typing import Tuple
 
 import numpy as np
 import torch
+torch.hpu.current_device()
 import torch.distributed as dist
 
 from sglang.srt.configs.model_config import ModelConfig
@@ -342,7 +344,7 @@ def latency_test_run_once(
         profiler = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
+                torch.profiler.ProfilerActivity.HPU,
             ],
             with_stack=True,
         )
