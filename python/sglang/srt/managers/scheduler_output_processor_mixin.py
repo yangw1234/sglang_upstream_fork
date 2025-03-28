@@ -66,6 +66,7 @@ class SchedulerOutputProcessorMixin:
                     continue
 
                 if self.is_mixed_chunk and self.enable_overlap and req.finished():
+                    raise NotImplementedError("Not implemented for mixed chunk")
                     # Free the one delayed token for the mixed decode batch
                     j = len(batch.out_cache_loc) - len(batch.reqs) + i
                     self.token_to_kv_pool_allocator.free(batch.out_cache_loc[j : j + 1])
@@ -205,6 +206,7 @@ class SchedulerOutputProcessorMixin:
                 continue
 
             if self.enable_overlap and req.finished():
+                raise NotImplementedError("Not implemented for overlap")
                 # Free the one extra delayed token
                 if self.page_size == 1:
                     self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
