@@ -856,6 +856,12 @@ class ModelRunner:
             )
 
             self.attn_backend = TorchNativeAttnBackend(self)
+        elif self.server_args.attention_backend == "hpu":
+            from sglang.srt.layers.attention.hpu_attn_backend import (
+                HPUAttnBackend,
+            )
+
+            self.attn_backend = HPUAttnBackend(self)
         elif self.server_args.attention_backend == "flashinfer_mla":
             from sglang.srt.layers.attention.flashinfer_mla_backend import (
                 FlashInferMLAAttnBackend,

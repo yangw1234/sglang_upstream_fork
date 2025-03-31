@@ -127,6 +127,24 @@ class CaptureHiddenMode(IntEnum):
     def is_last(self):
         return self == CaptureHiddenMode.LAST
 
+import itertools
+import math
+from vllm_hpu_extension.bucketing import find_bucket
+
+from vllm.utils import make_tensor_with_pad
+def flatten(in_list):
+    return list(itertools.chain(*in_list))
+
+def make_cpu_tensor(data, max_len, pad, dtype, flat):
+    if flat:
+        data = [flatten(data)]
+    result = make_tensor_with_pad(data,
+                                  max_len=max_len,
+                                  pad=pad,
+                                  dtype=dtype,
+                                  device='cpu')
+    return result
+
 
 @dataclass
 class ForwardBatch:
@@ -223,6 +241,10 @@ class ForwardBatch:
     # For Qwen2-VL
     mrope_positions: torch.Tensor = None
 
+    attn_bias: Optional[torch.Tensor] = None
+
+    valid_seq_len: Optional[torch.Tensor] = None
+
     @classmethod
     def init_new(
         cls,
@@ -306,7 +328,7 @@ class ForwardBatch:
             ret.extend_prefix_lens = torch.tensor(
                 batch.extend_prefix_lens, dtype=torch.int32
             ).to(device, non_blocking=True)
-            if model_runner.server_args.attention_backend != "torch_native":
+            if model_runner.server_args.attention_backend not in ["torch_native", "hpu"]:
                 ret.extend_num_tokens = batch.extend_num_tokens
                 positions, ret.extend_start_loc = compute_position_triton(
                     ret.extend_prefix_lens,
@@ -330,7 +352,47 @@ class ForwardBatch:
         if model_runner.server_args.lora_paths is not None:
             model_runner.lora_manager.prepare_lora_batch(ret)
 
+        seq_len_list = ret.extend_seq_lens_cpu
+        if model_runner.server_args.attention_backend == "hpu":
+            if ret.forward_mode.is_extend():
+                sum_seq_len = sum(seq_len_list)
+                max_prompt_len = find_bucket(sum_seq_len, (128, 128, 2048))
+                ret.attn_bias = cls.make_hpu_attn_bias(
+                    seq_lens=seq_len_list,
+                    max_prompt_len=max_prompt_len,
+                    dtype=model_runner.dtype,
+                ).to(model_runner.device)
+                padding_len = max_prompt_len - sum_seq_len
+                ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
+                ret.positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
+                ret.valid_seq_len = torch.tensor(sum_seq_len, dtype=torch.int32)
+                ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padding_len), value=0)
         return ret
+
+    @classmethod
+    def make_hpu_attn_bias(cls, seq_lens, max_prompt_len, dtype):
+        seq_pos = [list(range(sl)) for sl in seq_lens]
+        seq_idx = [[i] * sl for i, sl in enumerate(seq_lens)]
+        seq_pos = make_cpu_tensor(seq_pos,
+                                  max_len=max_prompt_len,
+                                  pad=-1,
+                                  dtype=torch.long,
+                                  flat=True)
+        seq_idx = make_cpu_tensor(seq_idx,
+                                  max_len=max_prompt_len,
+                                  pad=-1,
+                                  dtype=torch.long,
+                                  flat=True)
+        q_seq_idx = seq_idx.unsqueeze(-1)
+        kv_seq_idx = seq_idx.unsqueeze(-2)
+        q_seq_pos = seq_pos.unsqueeze(-1)
+        kv_seq_pos = seq_pos.unsqueeze(-2)
+        seq_idx = q_seq_idx != kv_seq_idx
+        seq_pos = kv_seq_pos > q_seq_pos
+        attn_mask = seq_idx | seq_pos
+        attn_bias = torch.zeros_like(attn_mask, dtype=dtype)
+        attn_bias.masked_fill_(attn_mask, -math.inf)
+        return attn_bias.unsqueeze(1)
 
     def get_merged_image_inputs(self) -> Optional[ImageInputs]:
         """
