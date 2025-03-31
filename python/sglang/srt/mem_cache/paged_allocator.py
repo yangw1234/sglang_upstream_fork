@@ -378,7 +378,7 @@ class BlockManager():
             del self.req_to_block_ids[req_id]
             del self.seq_info[req_id]
 
-class PagedTokenToKVPoolAllocator:
+class HPUPagedTokenToKVPoolAllocator:
 
     def __init__(self, size, page_size, dtype, device, kvcache):
         self.block_manager = BlockManager(page_size, size // page_size)
@@ -386,6 +386,7 @@ class PagedTokenToKVPoolAllocator:
         self.size = size
         self.dtype = dtype
         self.device = device
+        self.page_size = page_size
 
     def available_size(self):
         return self.block_manager.available_size()
@@ -394,8 +395,8 @@ class PagedTokenToKVPoolAllocator:
         slot_ids = []
         for seq_id, need_size in id_len_pairs:
             slots, new_blocks = self.block_manager.allocate(seq_id, need_size)
-            print(f"seq_id: {seq_id}, need_size: {need_size}, slots: {slots}")
-            print(f"block_manager.seq_info: {self.block_manager.seq_info}")
+            # print(f"seq_id: {seq_id}, need_size: {need_size}, slots: {slots}")
+            # print(f"block_manager.seq_info: {self.block_manager.seq_info}")
             slot_ids.extend(slots)
         return slot_ids
 
@@ -403,8 +404,8 @@ class PagedTokenToKVPoolAllocator:
         slot_ids = []
         for seq_id in seq_ids:
             slots, new_blocks = self.block_manager.allocate(seq_id, 1)
-            print(f"seq_id: {seq_id}, slots: {slots}")
-            print(f"block_manager.seq_info: {self.block_manager.seq_info}")
+            # print(f"seq_id: {seq_id}, slots: {slots}")
+            # print(f"block_manager.seq_info: {self.block_manager.seq_info}")
             slot_ids.extend(slots)
         return slot_ids
 
