@@ -244,7 +244,7 @@ class ServerArgs:
 
         # Choose kernel backends
         if self.device == "hpu":
-            self.attention_backend = "torch_native"
+            self.attention_backend = "hpu"
             self.sampling_backend = "pytorch"
 
         if self.attention_backend is None:
