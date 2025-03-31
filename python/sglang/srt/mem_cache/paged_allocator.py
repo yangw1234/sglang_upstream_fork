@@ -409,9 +409,8 @@ class HPUPagedTokenToKVPoolAllocator:
             slot_ids.extend(slots)
         return slot_ids
 
-    def free(self, req_ids: List[int]):
-        for req_id in req_ids:
-            self.block_manager.free(req_id)
+    def free(self, req_id: int):
+        self.block_manager.free(req_id)
 
     def free_group_begin(self):
         pass
