@@ -417,3 +417,7 @@ class HPUPagedTokenToKVPoolAllocator:
 
     def free_group_end(self):
         pass
+
+    def clear(self):
+        self.block_manager.clear()
+
