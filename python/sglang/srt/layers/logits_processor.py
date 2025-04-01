@@ -74,6 +74,40 @@ class LogitsProcessorOutput:
     input_token_ids_logprobs_val: Optional[List] = None
     input_token_ids_logprobs_idx: Optional[List] = None
 
+    def trim_output(self, real_batch_size: int):
+        if self.next_token_logits is not None:
+            self.next_token_logits = self.next_token_logits[:real_batch_size]
+
+        if self.hidden_states is not None:
+            self.hidden_states = self.hidden_states[:real_batch_size]
+
+        if self.next_token_logprobs is not None:
+            self.next_token_logprobs = self.next_token_logprobs[:real_batch_size]
+
+        if self.next_token_top_logprobs_val is not None:
+            self.next_token_top_logprobs_val = self.next_token_top_logprobs_val[:real_batch_size]
+        if self.next_token_top_logprobs_idx is not None:
+            self.next_token_top_logprobs_idx = self.next_token_top_logprobs_idx[:real_batch_size]
+
+        if self.next_token_token_ids_logprobs_val is not None:
+            self.next_token_token_ids_logprobs_val = self.next_token_token_ids_logprobs_val[:real_batch_size]
+        if self.next_token_token_ids_logprobs_idx is not None:
+            self.next_token_token_ids_logprobs_idx = self.next_token_token_ids_logprobs_idx[:real_batch_size]
+
+        if self.input_token_logprobs is not None:
+            self.input_token_logprobs = self.input_token_logprobs[:real_batch_size]
+
+        if self.input_top_logprobs_val is not None:
+            self.input_top_logprobs_val = self.input_top_logprobs_val[:real_batch_size]
+        if self.input_top_logprobs_idx is not None:
+            self.input_top_logprobs_idx = self.input_top_logprobs_idx[:real_batch_size]
+
+        if self.input_token_ids_logprobs_val is not None:
+            self.input_token_ids_logprobs_val = self.input_token_ids_logprobs_val[:real_batch_size]
+        if self.input_token_ids_logprobs_idx is not None:
+            self.input_token_ids_logprobs_idx = self.input_token_ids_logprobs_idx[:real_batch_size]
+
+
 
 @dataclasses.dataclass
 class LogitsMetadata:

@@ -170,6 +170,7 @@ class TpModelWorker:
     ) -> Tuple[LogitsProcessorOutput, Optional[torch.Tensor]]:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
         logits_output = self.model_runner.forward(forward_batch)
+        logits_output.trim_output(forward_batch.real_batch_size)
         if launch_done:
             launch_done.set()
 

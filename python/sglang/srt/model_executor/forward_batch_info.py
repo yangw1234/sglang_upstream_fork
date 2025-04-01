@@ -239,7 +239,6 @@ class ForwardBatch:
     # Attention backend
     req_to_token_pool: ReqToTokenPool = None
     token_to_kv_pool: KVCache = None
-    token_to_kv_pool_allocator: Optional[object] = None
     attn_backend: AttentionBackend = None
 
     # For DP attention
@@ -279,6 +278,8 @@ class ForwardBatch:
     block_usage: Optional[torch.Tensor] = None
     block_scales: Optional[torch.Tensor] = None
     block_groups: Optional[torch.Tensor] = None
+
+    real_batch_size: Optional[int] = None
 
     @classmethod
     def _set_block_mapping(cls, metadata, batch_size, device, dtype):
@@ -333,6 +334,7 @@ class ForwardBatch:
         if USE_CONTIGUOUS_PA:
             # Pad block metadata if needed
             block_bucket_size = max(max(block_list) + 1, len(block_list))
+            block_bucket_size = find_bucket(block_bucket_size, (128, 128, 2048))
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
                 indices[bid] = i
@@ -351,7 +353,7 @@ class ForwardBatch:
         ret.block_usage = torch.tensor(block_usage, dtype=dtype, device=device)
 
         # Set block mapping and scales
-        ret.block_mapping, ret.attn_bias, ret.block_groups = cls._set_block_mapping(ret, ret.batch_size, device, dtype)
+        ret.block_mapping, ret.attn_bias, ret.block_groups = cls._set_block_mapping(ret, ret.input_ids.shape[0], device, dtype)
         ret.block_scales = cls._set_block_scales(ret, device)
 
 
@@ -388,7 +390,6 @@ class ForwardBatch:
             sampling_info=batch.sampling_info,
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
-            token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
             attn_backend=model_runner.attn_backend,
             spec_algorithm=batch.spec_algorithm,
             spec_info=batch.spec_info,
@@ -479,13 +480,26 @@ class ForwardBatch:
                 ret.positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
                 ret.valid_seq_len = torch.tensor(sum_seq_len, dtype=torch.int32)
                 ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padding_len), value=0)
+                ret.real_batch_size = ret.batch_size
+                ret.batch_size = 1
             else:
                 # Initialize block metadata for HPU paged attention
                 from sglang.srt.mem_cache.paged_allocator import HPUPagedTokenToKVPoolAllocator
-                paged_allocator: HPUPagedTokenToKVPoolAllocator = ret.token_to_kv_pool_allocator
+                paged_allocator: HPUPagedTokenToKVPoolAllocator = model_runner.token_to_kv_pool_allocator
+                padded_batch_size = find_bucket(ret.batch_size, (1, 32, 128))
                 block_tables = []
                 for i in range(ret.batch_size):
                     block_tables.append(paged_allocator.block_manager.seq_info[ret.req_pool_indices[i].item()][0])
+
+                for i in range(padded_batch_size - ret.batch_size):
+                    block_tables.append([_PAD_BLOCK_ID])
+
+                ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padded_batch_size), value=0)
+                ret.positions = torch.nn.functional.pad(ret.positions, (0, padded_batch_size), value=0)
+                ret.valid_seq_len = torch.ones(padded_batch_size, dtype=torch.int32)
+                ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padded_batch_size), value=0)
+                ret.real_batch_size = ret.batch_size
+                ret.batch_size = padded_batch_size
                 slot_mapping = ret.out_cache_loc
                 block_size = paged_allocator.page_size
 
