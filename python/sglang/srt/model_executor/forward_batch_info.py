@@ -50,6 +50,9 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
+_PAD_SLOT_ID = 0
+_PAD_BLOCK_ID = 0
+
 
 class ForwardMode(IntEnum):
     # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
@@ -130,6 +133,7 @@ class CaptureHiddenMode(IntEnum):
 import itertools
 import math
 from vllm_hpu_extension.bucketing import find_bucket
+from vllm_hpu_extension.ops import batch2block, block2batch
 
 from vllm.utils import make_tensor_with_pad
 def flatten(in_list):
@@ -144,6 +148,27 @@ def make_cpu_tensor(data, max_len, pad, dtype, flat):
                                   dtype=dtype,
                                   device='cpu')
     return result
+
+def gather_list(tensor, indices, pad_value):
+    result = [pad_value] * len(indices)
+    for i, idx in enumerate(indices):
+        if idx is not None:
+            result[i] = tensor[idx]
+    return result
+
+
+def round_up(value: int, k: int) -> int:
+    return (value + k - 1) // k * k
+
+
+def pad_list(input, k, v):
+    input_len = len(input)
+    target_len = round_up(input_len, k)
+    padding = target_len - input_len
+    return input + [v] * padding
+
+
+USE_CONTIGUOUS_PA = True
 
 
 @dataclass
@@ -244,6 +269,93 @@ class ForwardBatch:
     attn_bias: Optional[torch.Tensor] = None
 
     valid_seq_len: Optional[torch.Tensor] = None
+
+    page_size: Optional[int] = None
+
+    # For HPU paged attention
+    block_list: Optional[torch.Tensor] = None
+    block_mapping: Optional[torch.Tensor] = None
+    block_usage: Optional[torch.Tensor] = None
+    block_scales: Optional[torch.Tensor] = None
+    block_groups: Optional[torch.Tensor] = None
+
+    real_batch_size: Optional[int] = None
+
+    @classmethod
+    def _set_block_mapping(cls, metadata, batch_size, device, dtype):
+        """Set block mapping using one-hot encoding of block groups."""
+
+        mask = torch.arange(0,
+                            metadata.page_size,
+                            device=device,
+                            dtype=torch.int32).unsqueeze(0)
+        mask = mask >= metadata.block_usage.unsqueeze(-1)
+        attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
+            mask, -math.inf))
+
+        # Handle out of bounds classes on CPU
+        block_groups = metadata.block_groups.to(torch.long)
+        block_mapping = torch.nn.functional.relu(block_groups)
+        block_mapping = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size)
+        oob_values = block_groups.lt(0)
+        block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+        block_groups.masked_fill_(oob_values, batch_size)
+        return block_mapping.to(dtype), attn_bias, block_groups
+
+    @classmethod
+    def _set_block_scales(cls, metadata, device):
+        """Set block scales using batch2block and block2batch operations."""
+        block_mapping = metadata.block_mapping
+        ones = torch.ones((block_mapping.size(0),), device=device, dtype=block_mapping.dtype)
+        sums = batch2block(block2batch(ones, block_mapping), block_mapping)
+        block_scales = torch.reciprocal(torch.maximum(ones, sums))
+        return block_scales
+
+    @classmethod
+    def _init_block_metadata(cls, ret, model_runner, block_tables, slot_mapping, block_size):
+        """Initialize block metadata for HPU paged attention."""
+        device = model_runner.device
+        dtype = model_runner.dtype
+
+        # Calculate block metadata
+        last_block_usage = [
+            slot % block_size + 1 for slot in slot_mapping
+        ]
+        block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
+        block_usage = [[block_size] * (len(bt) - 1) + [lbu]
+                      for bt, lbu in zip(block_tables, last_block_usage)
+                      if bt]
+        block_list = flatten(block_tables)
+        block_groups = flatten(block_groups)
+        block_usage = flatten(block_usage)
+        assert len(block_list) == len(block_groups)
+        assert len(block_list) == len(block_usage)
+
+        if USE_CONTIGUOUS_PA:
+            # Pad block metadata if needed
+            block_bucket_size = max(max(block_list) + 1, len(block_list))
+            block_bucket_size = find_bucket(block_bucket_size, (128, 128, 2048))
+            indices = [None] * block_bucket_size
+            for i, bid in enumerate(block_list):
+                indices[bid] = i
+            padding_fn = lambda tensor, pad_value: gather_list(tensor, indices, pad_value)
+        else:
+            block_bucket_size = find_bucket(len(block_list), (128, 128, 2048))
+            padding_fn = lambda tensor, pad_value: pad_list(tensor, block_bucket_size, pad_value)
+
+        block_list = padding_fn(block_list, _PAD_BLOCK_ID)
+        block_groups = padding_fn(block_groups, -1)
+        block_usage = padding_fn(block_usage, 1)
+
+        # Convert to tensors
+        ret.block_list = torch.tensor(block_list, dtype=torch.long, device=device)
+        ret.block_groups = torch.tensor(block_groups, dtype=torch.long, device=device)
+        ret.block_usage = torch.tensor(block_usage, dtype=dtype, device=device)
+
+        # Set block mapping and scales
+        ret.block_mapping, ret.attn_bias, ret.block_groups = cls._set_block_mapping(ret, ret.input_ids.shape[0], device, dtype)
+        ret.block_scales = cls._set_block_scales(ret, device)
+
 
     @classmethod
     def init_new(
@@ -354,6 +466,7 @@ class ForwardBatch:
 
         seq_len_list = ret.extend_seq_lens_cpu
         if model_runner.server_args.attention_backend == "hpu":
+            ret.page_size = model_runner.token_to_kv_pool_allocator.page_size
             if ret.forward_mode.is_extend():
                 sum_seq_len = sum(seq_len_list)
                 max_prompt_len = find_bucket(sum_seq_len, (128, 128, 2048))
@@ -367,6 +480,31 @@ class ForwardBatch:
                 ret.positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
                 ret.valid_seq_len = torch.tensor(sum_seq_len, dtype=torch.int32)
                 ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padding_len), value=0)
+                ret.real_batch_size = ret.batch_size
+                ret.batch_size = 1
+            else:
+                # Initialize block metadata for HPU paged attention
+                from sglang.srt.mem_cache.paged_allocator import HPUPagedTokenToKVPoolAllocator
+                paged_allocator: HPUPagedTokenToKVPoolAllocator = model_runner.token_to_kv_pool_allocator
+                padded_batch_size = find_bucket(ret.batch_size, (1, 32, 128))
+                block_tables = []
+                for i in range(ret.batch_size):
+                    block_tables.append(paged_allocator.block_manager.seq_info[ret.req_pool_indices[i].item()][0])
+
+                for i in range(padded_batch_size - ret.batch_size):
+                    block_tables.append([_PAD_BLOCK_ID])
+
+                ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padded_batch_size), value=0)
+                ret.positions = torch.nn.functional.pad(ret.positions, (0, padded_batch_size), value=0)
+                ret.valid_seq_len = torch.ones(padded_batch_size, dtype=torch.int32)
+                ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padded_batch_size), value=0)
+                ret.real_batch_size = ret.batch_size
+                ret.batch_size = padded_batch_size
+                slot_mapping = ret.out_cache_loc
+                block_size = paged_allocator.page_size
+
+                cls._init_block_metadata(ret, model_runner, block_tables, slot_mapping, block_size)
+
         return ret
 
     @classmethod
