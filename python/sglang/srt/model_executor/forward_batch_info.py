@@ -281,6 +281,9 @@ class ForwardBatch:
 
     real_batch_size: Optional[int] = None
 
+    seq_pos: Optional[torch.Tensor] = None
+    seq_idx: Optional[torch.Tensor] = None
+
     @classmethod
     def _set_block_mapping(cls, metadata, batch_size, device, dtype):
         """Set block mapping using one-hot encoding of block groups."""
@@ -470,11 +473,11 @@ class ForwardBatch:
             if ret.forward_mode.is_extend():
                 sum_seq_len = sum(seq_len_list)
                 max_prompt_len = find_bucket(sum_seq_len, (128, 128, 2048))
-                ret.attn_bias = cls.make_hpu_attn_bias(
+                ret.attn_bias, ret.seq_pos, ret.seq_idx = cls.make_hpu_attn_bias(
                     seq_lens=seq_len_list,
                     max_prompt_len=max_prompt_len,
                     dtype=model_runner.dtype,
-                ).to(model_runner.device)
+                )
                 padding_len = max_prompt_len - sum_seq_len
                 ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
                 ret.positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
@@ -522,16 +525,18 @@ class ForwardBatch:
                                   pad=-1,
                                   dtype=torch.long,
                                   flat=True)
-        q_seq_idx = seq_idx.unsqueeze(-1)
-        kv_seq_idx = seq_idx.unsqueeze(-2)
-        q_seq_pos = seq_pos.unsqueeze(-1)
-        kv_seq_pos = seq_pos.unsqueeze(-2)
-        seq_idx = q_seq_idx != kv_seq_idx
-        seq_pos = kv_seq_pos > q_seq_pos
-        attn_mask = seq_idx | seq_pos
-        attn_bias = torch.zeros_like(attn_mask, dtype=dtype)
-        attn_bias.masked_fill_(attn_mask, -math.inf)
-        return attn_bias.unsqueeze(1)
+        # q_seq_idx = seq_idx.unsqueeze(-1)
+        # kv_seq_idx = seq_idx.unsqueeze(-2)
+        # q_seq_pos = seq_pos.unsqueeze(-1)
+        # kv_seq_pos = seq_pos.unsqueeze(-2)
+        # seq_idx = q_seq_idx != kv_seq_idx
+        # seq_pos = kv_seq_pos > q_seq_pos
+        # attn_mask = seq_idx | seq_pos
+        
+        # attn_bias.masked_fill_(attn_mask, -math.inf)
+        # return attn_bias.unsqueeze(1)
+        attn_bias = torch.zeros(1, 1, max_prompt_len, max_prompt_len, dtype=dtype)
+        return attn_bias, seq_pos, seq_idx
 
     def get_merged_image_inputs(self) -> Optional[ImageInputs]:
         """
@@ -631,6 +636,8 @@ HPUForwardBatch = namedtuple(
         "out_cache_loc",
         "positions",
         "attn_bias",
+        "seq_pos",
+        "seq_idx",
         "valid_seq_len",
         "extend_seq_lens",
         "page_size",
@@ -656,7 +663,9 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch):
             input_ids=forward_batch.input_ids.to("hpu"),
             out_cache_loc=forward_batch.out_cache_loc.to("hpu"),
             positions=forward_batch.positions.to("hpu"),
-            attn_bias=forward_batch.attn_bias.to("hpu"),
+            attn_bias=forward_batch.attn_bias.to("hpu") if forward_batch.attn_bias is not None else None,
+            seq_pos=forward_batch.seq_pos.to("hpu") if forward_batch.seq_pos is not None else None,
+            seq_idx=forward_batch.seq_idx.to("hpu") if forward_batch.seq_idx is not None else None,
             valid_seq_len=forward_batch.valid_seq_len.to("hpu") if forward_batch.valid_seq_len is not None else None,
             extend_seq_lens=forward_batch.extend_seq_lens.to("hpu") if forward_batch.extend_seq_lens is not None else None,
             page_size=forward_batch.page_size,
