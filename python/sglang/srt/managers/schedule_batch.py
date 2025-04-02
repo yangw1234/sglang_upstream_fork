@@ -524,6 +524,8 @@ class Req:
 
 bid = 0
 
+from sglang.srt.utils import is_hpu
+IS_HPU = is_hpu()
 
 @dataclasses.dataclass
 class ScheduleBatch:
@@ -978,7 +980,7 @@ class ScheduleBatch:
         if self.token_to_kv_pool_allocator.page_size == 1:
             out_cache_loc = self.alloc_token_slots(extend_num_tokens)
         else:
-            if self.device == "hpu":
+            if IS_HPU:
                 out_cache_loc = self.alloc_paged_token_slots_extend_hpu(
                     reqs, extend_lens
                 )
@@ -1143,7 +1145,7 @@ class ScheduleBatch:
                 token_indices = self.req_to_token_pool.req_to_token[
                     req.req_pool_idx, : seq_lens_cpu[idx]
                 ]
-                if self.device == "hpu":
+                if IS_HPU:
                     self.token_to_kv_pool_allocator.free(req.req_pool_idx)
                 else:
                     self.token_to_kv_pool_allocator.free(token_indices)
@@ -1258,7 +1260,7 @@ class ScheduleBatch:
             last_loc = self.req_to_token_pool.req_to_token[
                 self.req_pool_indices, self.seq_lens - 2
             ]
-            if self.device == "hpu":
+            if IS_HPU:
                 self.out_cache_loc = self.alloc_paged_token_slots_decode_hpu(
                     self.reqs
                 )

@@ -314,7 +314,7 @@ class ForwardBatch:
     @classmethod
     def _init_block_metadata(cls, ret, model_runner, block_tables, slot_mapping, block_size):
         """Initialize block metadata for HPU paged attention."""
-        device = model_runner.device
+        device = "cpu"
         dtype = model_runner.dtype
 
         # Calculate block metadata
@@ -479,6 +479,7 @@ class ForwardBatch:
                 ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
                 ret.positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
                 ret.valid_seq_len = torch.tensor(sum_seq_len, dtype=torch.int32)
+                ret.extend_seq_lens = torch.nn.functional.pad(ret.extend_seq_lens, (0, padding_len), value=0)
                 ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padding_len), value=0)
                 ret.real_batch_size = ret.batch_size
                 ret.batch_size = 1
@@ -615,6 +616,76 @@ class ForwardBatch:
             axis=1,
         )
         self.mrope_positions = self.mrope_positions.to(torch.int64)
+
+@dataclass
+class HPUForwardBatch:
+    forward_mode: ForwardMode
+    batch_size: int # this has to be padded batch size
+    input_ids: torch.Tensor
+    out_cache_loc: torch.Tensor
+    positions: torch.Tensor
+    attn_bias: torch.Tensor
+    valid_seq_len: torch.Tensor
+    extend_seq_lens: torch.Tensor
+    page_size: int
+    block_list: torch.Tensor
+    block_mapping: torch.Tensor
+    block_groups: torch.Tensor
+    block_usage: torch.Tensor
+    block_scales: torch.Tensor
+    attn_backend: AttentionBackend
+    token_to_kv_pool: KVCache
+    input_embeds: Optional[torch.Tensor] = None # do not change
+    extend_return_logprob: bool = False # do not change
+    padded_static_len: int = -1 # do not change
+    capture_hidden_mode: CaptureHiddenMode = CaptureHiddenMode.NULL # do not change
+
+    @classmethod
+    def from_forward_batch(cls, forward_batch: ForwardBatch):
+        return cls(
+            forward_mode=forward_batch.forward_mode,
+            batch_size=forward_batch.batch_size,
+            input_ids=forward_batch.input_ids.to("hpu", non_blocking=True),
+            out_cache_loc=forward_batch.out_cache_loc.to("hpu", non_blocking=True),
+            positions=forward_batch.positions.to("hpu", non_blocking=True),
+            attn_bias=forward_batch.attn_bias.to("hpu", non_blocking=True),
+            valid_seq_len=forward_batch.valid_seq_len.to("hpu", non_blocking=True) if forward_batch.valid_seq_len is not None else None,
+            extend_seq_lens=forward_batch.extend_seq_lens.to("hpu", non_blocking=True) if forward_batch.extend_seq_lens is not None else None,
+            page_size=forward_batch.page_size,
+            block_list=forward_batch.block_list.to("hpu", non_blocking=True) if forward_batch.block_list is not None else None,
+            block_mapping=forward_batch.block_mapping.to("hpu", non_blocking=True) if forward_batch.block_mapping is not None else None,
+            block_groups=forward_batch.block_groups.to("hpu", non_blocking=True) if forward_batch.block_groups is not None else None,
+            block_usage=forward_batch.block_usage.to("hpu", non_blocking=True) if forward_batch.block_usage is not None else None,
+            block_scales=forward_batch.block_scales.to("hpu", non_blocking=True) if forward_batch.block_scales is not None else None,
+            attn_backend=forward_batch.attn_backend,
+            token_to_kv_pool=forward_batch.token_to_kv_pool,
+        )
+
+    def __hash__(self) -> int:
+        return torch.hpu.graphs.input_hash(
+            (
+                self.forward_mode,
+                self.batch_size,
+                self.input_ids,
+                self.out_cache_loc,
+                self.positions,
+                self.attn_bias,
+                self.valid_seq_len,
+                self.extend_seq_lens,
+                self.page_size,
+                self.block_list,
+                self.block_mapping,
+                self.block_groups,
+                self.block_usage,
+                self.block_scales,
+                self.attn_backend,
+                self.token_to_kv_pool,
+                self.input_embeds,
+                self.extend_return_logprob,
+                self.padded_static_len,
+                self.capture_hidden_mode,
+            )
+        )
 
 
 def compute_position_triton(

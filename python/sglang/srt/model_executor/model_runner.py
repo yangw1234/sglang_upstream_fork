@@ -177,6 +177,13 @@ class ModelRunner:
         self.sampler = Sampler()
         self.load_model()
 
+
+        import habana_frameworks.torch as htorch
+        self.model = htorch.hpu.wrap_in_hpu_graph(
+            self.model,
+            disable_tensor_cache=True,
+        ) if htorch.utils.internal.is_lazy() else self.model
+
         # Apply torchao quantization
         torchao_applied = getattr(self.model, "torchao_applied", False)
         # In layered loading, torchao may have been applied
@@ -733,7 +740,7 @@ class ModelRunner:
             self.req_to_token_pool = ReqToTokenPool(
                 size=max_num_reqs + 1,
                 max_context_len=self.model_config.context_len + 4,
-                device=self.device,
+                device=self.device if self.device != "hpu" else "cpu",
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
         else:
@@ -792,7 +799,7 @@ class ModelRunner:
                         self.max_total_num_tokens,
                         page_size=self.page_size,
                         dtype=self.kv_cache_dtype,
-                        device=self.device,
+                        device=self.device if self.device != "hpu" else "cpu",
                         kvcache=self.token_to_kv_pool,
                     )
                 else:

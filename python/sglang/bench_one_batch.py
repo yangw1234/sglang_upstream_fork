@@ -242,7 +242,10 @@ def extend(reqs, model_runner):
     batch.prepare_for_extend()
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
-    logits_output = model_runner.forward(forward_batch)
+    from sglang.srt.model_executor.forward_batch_info import HPUForwardBatch
+    hpu_forward_batch = HPUForwardBatch.from_forward_batch(forward_batch)
+    logits_output = model_runner.forward(hpu_forward_batch)
+    logits_output.trim_output(forward_batch.real_batch_size)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits, batch
 
@@ -253,7 +256,10 @@ def decode(input_token_ids, batch, model_runner):
     batch.prepare_for_decode()
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
-    logits_output = model_runner.forward(forward_batch)
+    from sglang.srt.model_executor.forward_batch_info import HPUForwardBatch
+    hpu_forward_batch = HPUForwardBatch.from_forward_batch(forward_batch)
+    logits_output = model_runner.forward(hpu_forward_batch)
+    logits_output.trim_output(forward_batch.real_batch_size)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits
 
