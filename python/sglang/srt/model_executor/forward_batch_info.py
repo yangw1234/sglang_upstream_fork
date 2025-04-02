@@ -617,74 +617,56 @@ class ForwardBatch:
         )
         self.mrope_positions = self.mrope_positions.to(torch.int64)
 
-@dataclass
-class HPUForwardBatch:
-    forward_mode: ForwardMode
-    batch_size: int # this has to be padded batch size
-    input_ids: torch.Tensor
-    out_cache_loc: torch.Tensor
-    positions: torch.Tensor
-    attn_bias: torch.Tensor
-    valid_seq_len: torch.Tensor
-    extend_seq_lens: torch.Tensor
-    page_size: int
-    block_list: torch.Tensor
-    block_mapping: torch.Tensor
-    block_groups: torch.Tensor
-    block_usage: torch.Tensor
-    block_scales: torch.Tensor
-    attn_backend: AttentionBackend
-    token_to_kv_pool: KVCache
-    input_embeds: Optional[torch.Tensor] = None # do not change
-    extend_return_logprob: bool = False # do not change
-    padded_static_len: int = -1 # do not change
-    capture_hidden_mode: CaptureHiddenMode = CaptureHiddenMode.NULL # do not change
+from typing import Optional
+from torch import Tensor
+from dataclasses import dataclass
+from collections import namedtuple
 
-    @classmethod
-    def from_forward_batch(cls, forward_batch: ForwardBatch):
-        return cls(
+HPUForwardBatch = namedtuple(
+    "HPUForwardBatch",
+    [
+        "forward_mode",
+        "batch_size",
+        "input_ids",
+        "out_cache_loc",
+        "positions",
+        "attn_bias",
+        "valid_seq_len",
+        "extend_seq_lens",
+        "page_size",
+        "block_list",
+        "block_mapping",
+        "block_groups",
+        "block_usage",
+        "block_scales",
+        "attn_backend",
+        "token_to_kv_pool",
+        "input_embeds",
+        "extend_return_logprob",
+        "padded_static_len",
+        "capture_hidden_mode",
+    ],
+    defaults=[None, False, -1, CaptureHiddenMode.NULL],
+)
+
+def create_hpu_forward_batch(forward_batch: ForwardBatch):
+    return HPUForwardBatch(
             forward_mode=forward_batch.forward_mode,
             batch_size=forward_batch.batch_size,
-            input_ids=forward_batch.input_ids.to("hpu", non_blocking=True),
-            out_cache_loc=forward_batch.out_cache_loc.to("hpu", non_blocking=True),
-            positions=forward_batch.positions.to("hpu", non_blocking=True),
-            attn_bias=forward_batch.attn_bias.to("hpu", non_blocking=True),
-            valid_seq_len=forward_batch.valid_seq_len.to("hpu", non_blocking=True) if forward_batch.valid_seq_len is not None else None,
-            extend_seq_lens=forward_batch.extend_seq_lens.to("hpu", non_blocking=True) if forward_batch.extend_seq_lens is not None else None,
+            input_ids=forward_batch.input_ids.to("hpu"),
+            out_cache_loc=forward_batch.out_cache_loc.to("hpu"),
+            positions=forward_batch.positions.to("hpu"),
+            attn_bias=forward_batch.attn_bias.to("hpu"),
+            valid_seq_len=forward_batch.valid_seq_len.to("hpu") if forward_batch.valid_seq_len is not None else None,
+            extend_seq_lens=forward_batch.extend_seq_lens.to("hpu") if forward_batch.extend_seq_lens is not None else None,
             page_size=forward_batch.page_size,
-            block_list=forward_batch.block_list.to("hpu", non_blocking=True) if forward_batch.block_list is not None else None,
-            block_mapping=forward_batch.block_mapping.to("hpu", non_blocking=True) if forward_batch.block_mapping is not None else None,
-            block_groups=forward_batch.block_groups.to("hpu", non_blocking=True) if forward_batch.block_groups is not None else None,
-            block_usage=forward_batch.block_usage.to("hpu", non_blocking=True) if forward_batch.block_usage is not None else None,
-            block_scales=forward_batch.block_scales.to("hpu", non_blocking=True) if forward_batch.block_scales is not None else None,
+            block_list=forward_batch.block_list.to("hpu") if forward_batch.block_list is not None else None,
+            block_mapping=forward_batch.block_mapping.to("hpu") if forward_batch.block_mapping is not None else None,
+            block_groups=forward_batch.block_groups.to("hpu") if forward_batch.block_groups is not None else None,
+            block_usage=forward_batch.block_usage.to("hpu") if forward_batch.block_usage is not None else None,
+            block_scales=forward_batch.block_scales.to("hpu") if forward_batch.block_scales is not None else None,
             attn_backend=forward_batch.attn_backend,
             token_to_kv_pool=forward_batch.token_to_kv_pool,
-        )
-
-    def __hash__(self) -> int:
-        return torch.hpu.graphs.input_hash(
-            (
-                self.forward_mode,
-                self.batch_size,
-                self.input_ids,
-                self.out_cache_loc,
-                self.positions,
-                self.attn_bias,
-                self.valid_seq_len,
-                self.extend_seq_lens,
-                self.page_size,
-                self.block_list,
-                self.block_mapping,
-                self.block_groups,
-                self.block_usage,
-                self.block_scales,
-                self.attn_backend,
-                self.token_to_kv_pool,
-                self.input_embeds,
-                self.extend_return_logprob,
-                self.padded_static_len,
-                self.capture_hidden_mode,
-            )
         )
 
 

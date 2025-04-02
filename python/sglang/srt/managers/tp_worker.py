@@ -169,8 +169,8 @@ class TpModelWorker:
         skip_sample: bool = False,
     ) -> Tuple[LogitsProcessorOutput, Optional[torch.Tensor]]:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
-        from sglang.srt.model_executor.forward_batch_info import HPUForwardBatch
-        hpu_forward_batch = HPUForwardBatch.from_forward_batch(forward_batch)
+        from sglang.srt.model_executor.forward_batch_info import create_hpu_forward_batch
+        hpu_forward_batch = create_hpu_forward_batch(forward_batch)
         import habana_frameworks.torch as htorch
         htorch.core.mark_step()
         logits_output = self.model_runner.forward(hpu_forward_batch)
@@ -184,7 +184,7 @@ class TpModelWorker:
         else:
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
         htorch.core.mark_step()
-        next_token_ids = next_token_ids.to("cpu", non_blocking=True)
+        next_token_ids = next_token_ids.to("cpu")
 
         return logits_output, next_token_ids
 
