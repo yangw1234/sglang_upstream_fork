@@ -524,6 +524,8 @@ class Req:
 
 bid = 0
 
+from sglang.srt.utils import is_hpu
+IS_HPU = is_hpu()
 
 @dataclasses.dataclass
 class ScheduleBatch:
@@ -708,6 +710,41 @@ class ScheduleBatch:
             raise RuntimeError(error_msg)
         return out_cache_loc
 
+    def alloc_paged_token_slots_extend_hpu(
+        self,
+        reqs: List[Req],
+        extend_lens: List[int],
+    ):
+        extend_num_tokens = sum(extend_lens)
+        batch_size = len(reqs)
+        if (
+            self.token_to_kv_pool_allocator.available_size()
+            < extend_num_tokens
+            + batch_size * self.token_to_kv_pool_allocator.page_size
+        ):
+            if self.tree_cache is not None:
+                self.tree_cache.evict(
+                    extend_num_tokens
+                    + batch_size * self.token_to_kv_pool_allocator.page_size,
+                )
+
+        id_len_pairs = [(req.req_pool_idx, extend_lens[i]) for i, req in enumerate(reqs)]
+        out_cache_loc = self.token_to_kv_pool_allocator.alloc_extend(
+            id_len_pairs
+        )
+        out_cache_loc = torch.tensor(out_cache_loc, dtype=torch.int64, device=self.device)
+        if out_cache_loc is None:
+            error_msg = (
+                f"Prefill out of memory. Try to lower your batch size.\n"
+                f"Try to allocate {extend_num_tokens} tokens.\n"
+                f"Avaliable tokens: {self.token_to_kv_pool_allocator.available_size() + self.tree_cache.evictable_size()}\n"
+                f"{self.token_to_kv_pool_allocator.available_size()=}\n"
+                f"{self.tree_cache.evictable_size()=}\n"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        return out_cache_loc
+
     def alloc_paged_token_slots_decode(
         self,
         seq_lens: torch.Tensor,
@@ -727,6 +764,33 @@ class ScheduleBatch:
             error_msg = (
                 f"Decode out of memory. Try to lower your batch size.\n"
                 f"Try to allocate {len(seq_lens)} tokens.\n"
+                f"Avaliable tokens: {self.token_to_kv_pool_allocator.available_size() + self.tree_cache.evictable_size()}\n"
+                f"{self.token_to_kv_pool_allocator.available_size()=}\n"
+                f"{self.tree_cache.evictable_size()=}\n"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        return out_cache_loc
+
+    def alloc_paged_token_slots_decode_hpu(
+        self,
+        reqs: List[Req],
+    ):
+        seq_ids = [req.req_pool_idx for req in reqs]
+        if (
+            self.token_to_kv_pool_allocator.available_size()
+            < len(seq_ids) * self.token_to_kv_pool_allocator.page_size
+        ):
+            if self.tree_cache is not None:
+                self.tree_cache.evict(
+                    len(seq_ids) * self.token_to_kv_pool_allocator.page_size,
+                )
+        out_cache_loc = self.token_to_kv_pool_allocator.alloc_decode(seq_ids)
+        out_cache_loc = torch.tensor(out_cache_loc, dtype=torch.int64, device=self.device)
+        if out_cache_loc is None:
+            error_msg = (
+                f"Decode out of memory. Try to lower your batch size.\n"
+                f"Try to allocate {len(seq_ids)} tokens.\n"
                 f"Avaliable tokens: {self.token_to_kv_pool_allocator.available_size() + self.tree_cache.evictable_size()}\n"
                 f"{self.token_to_kv_pool_allocator.available_size()=}\n"
                 f"{self.tree_cache.evictable_size()=}\n"
@@ -916,14 +980,19 @@ class ScheduleBatch:
         if self.token_to_kv_pool_allocator.page_size == 1:
             out_cache_loc = self.alloc_token_slots(extend_num_tokens)
         else:
-            last_loc = get_last_loc(
-                self.req_to_token_pool.req_to_token,
-                req_pool_indices_tensor,
-                prefix_lens_tensor,
-            )
-            out_cache_loc = self.alloc_paged_token_slots_extend(
-                prefix_lens_tensor, seq_lens_tensor, last_loc, extend_num_tokens
-            )
+            if IS_HPU:
+                out_cache_loc = self.alloc_paged_token_slots_extend_hpu(
+                    reqs, extend_lens
+                )
+            else:
+                last_loc = get_last_loc(
+                    self.req_to_token_pool.req_to_token,
+                    req_pool_indices_tensor,
+                    prefix_lens_tensor,
+                )
+                out_cache_loc = self.alloc_paged_token_slots_extend(
+                    prefix_lens_tensor, seq_lens_tensor, last_loc, extend_num_tokens
+                )
 
         # Set fields
         self.input_ids = input_ids_tensor
@@ -948,7 +1017,7 @@ class ScheduleBatch:
         self.extend_input_logprob_token_ids = extend_input_logprob_token_ids
 
         # Write to req_to_token_pool
-        if global_server_args_dict["attention_backend"] != "torch_native":
+        if global_server_args_dict["attention_backend"] not in ["torch_native", "hpu"]:
             # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
 
             write_req_to_token_pool_triton[(bs,)](
@@ -1076,9 +1145,13 @@ class ScheduleBatch:
                 token_indices = self.req_to_token_pool.req_to_token[
                     req.req_pool_idx, : seq_lens_cpu[idx]
                 ]
-                self.token_to_kv_pool_allocator.free(token_indices)
+                if IS_HPU:
+                    self.token_to_kv_pool_allocator.free(req.req_pool_idx)
+                else:
+                    self.token_to_kv_pool_allocator.free(token_indices)
                 self.req_to_token_pool.free(req.req_pool_idx)
             else:
+                raise NotImplementedError("Not implemented for non-ChunkCache")
                 # TODO: apply more fine-grained retraction
                 last_uncached_pos = len(req.prefix_indices)
                 token_indices = self.req_to_token_pool.req_to_token[
@@ -1187,9 +1260,14 @@ class ScheduleBatch:
             last_loc = self.req_to_token_pool.req_to_token[
                 self.req_pool_indices, self.seq_lens - 2
             ]
-            self.out_cache_loc = self.alloc_paged_token_slots_decode(
-                self.seq_lens, last_loc
-            )
+            if IS_HPU:
+                self.out_cache_loc = self.alloc_paged_token_slots_decode_hpu(
+                    self.reqs
+                )
+            else:
+                self.out_cache_loc = self.alloc_paged_token_slots_decode(
+                    self.seq_lens, last_loc
+                )
 
         self.req_to_token_pool.write(
             (self.req_pool_indices, locs), self.out_cache_loc.to(torch.int32)
