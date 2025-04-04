@@ -290,10 +290,19 @@ class ForwardBatch:
     block_scales: Optional[torch.Tensor] = None
     block_groups: Optional[torch.Tensor] = None
 
+    block_indices: Optional[torch.Tensor] = None
+    block_offsets: Optional[torch.Tensor] = None
+
     real_batch_size: Optional[int] = None
 
     seq_pos: Optional[torch.Tensor] = None
     seq_idx: Optional[torch.Tensor] = None
+
+    @classmethod
+    def _set_block_indices_and_offsets(cls, slot_mapping, block_size):
+        indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+        offsets = torch.fmod(slot_mapping, block_size)
+        return indices, offsets
 
     @classmethod
     def _set_block_mapping(cls, metadata, batch_size, device, dtype):
@@ -523,6 +532,8 @@ class ForwardBatch:
                 ret.positions = positions
                 ret.batch_size = padded_batch_size
                 cls._init_block_metadata(ret, model_runner, block_tables, slot_mapping, block_size)
+            ret.block_indices, ret.block_offsets = cls._set_block_indices_and_offsets(ret.out_cache_loc,
+                                                                                      model_runner.token_to_kv_pool_allocator.page_size)
         return ret
 
     @classmethod
@@ -647,7 +658,7 @@ HPUForwardBatch = namedtuple(
         "forward_mode",
         "batch_size",
         "input_ids",
-        "out_cache_loc",
+        # "out_cache_loc",
         "positions",
         "attn_bias",
         "seq_pos",
@@ -660,6 +671,8 @@ HPUForwardBatch = namedtuple(
         "block_groups",
         "block_usage",
         "block_scales",
+        "block_indices",
+        "block_offsets",
         "attn_backend",
         "token_to_kv_pool",
         "input_embeds",
@@ -675,7 +688,7 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch):
             forward_mode=forward_batch.forward_mode,
             batch_size=forward_batch.batch_size,
             input_ids=forward_batch.input_ids.to("hpu"),
-            out_cache_loc=forward_batch.out_cache_loc.to("hpu"),
+            # out_cache_loc=forward_batch.out_cache_loc.to("hpu"),
             positions=forward_batch.positions.to("hpu"),
             attn_bias=forward_batch.attn_bias.to("hpu") if forward_batch.attn_bias is not None else None,
             seq_pos=forward_batch.seq_pos.to("hpu") if forward_batch.seq_pos is not None else None,
@@ -688,6 +701,8 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch):
             block_groups=forward_batch.block_groups.to("hpu") if forward_batch.block_groups is not None else None,
             block_usage=forward_batch.block_usage.to("hpu") if forward_batch.block_usage is not None else None,
             block_scales=forward_batch.block_scales.to("hpu") if forward_batch.block_scales is not None else None,
+            block_indices=forward_batch.block_indices.to("hpu") if forward_batch.block_indices is not None else None,
+            block_offsets=forward_batch.block_offsets.to("hpu") if forward_batch.block_offsets is not None else None,
             attn_backend=forward_batch.attn_backend,
             token_to_kv_pool=forward_batch.token_to_kv_pool,
         )

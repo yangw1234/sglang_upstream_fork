@@ -241,7 +241,7 @@ class MHATokenToKVPool(KVCache):
             # The padded slot 0 is used for writing dummy outputs from padded tokens.
             self.k_buffer = [
                 torch.zeros(
-                    (self.size + self.page_size, self.head_num, self.head_dim),
+                    (self.size // self.page_size + 1, self.page_size, self.head_num, self.head_dim),
                     dtype=self.store_dtype,
                     device=self.device,
                 )
@@ -249,7 +249,7 @@ class MHATokenToKVPool(KVCache):
             ]
             self.v_buffer = [
                 torch.zeros(
-                    (self.size + self.page_size, self.head_num, self.head_dim),
+                    (self.size // self.page_size + 1, self.page_size, self.head_num, self.head_dim),
                     dtype=self.store_dtype,
                     device=self.device,
                 )
@@ -320,7 +320,8 @@ class MHATokenToKVPool(KVCache):
     def set_kv_buffer(
         self,
         layer: RadixAttention,
-        loc: torch.Tensor,
+        block_indices: torch.Tensor,
+        block_offsets: torch.Tensor,
         cache_k: torch.Tensor,
         cache_v: torch.Tensor,
         k_scale: Optional[float] = None,
@@ -340,6 +341,7 @@ class MHATokenToKVPool(KVCache):
             cache_v = cache_v.view(self.store_dtype)
 
         if self.capture_mode and cache_k.shape[0] < 4:
+            pass
             # Overlap the copy of K and V cache for small batch size
             current_stream = self.device_module.current_stream()
             self.alt_stream.wait_stream(current_stream)
@@ -348,8 +350,8 @@ class MHATokenToKVPool(KVCache):
             self.v_buffer[layer_id][loc] = cache_v
             current_stream.wait_stream(self.alt_stream)
         else:
-            self.k_buffer[layer_id][loc] = cache_k
-            self.v_buffer[layer_id][loc] = cache_v
+            self.k_buffer[layer_id].index_put_((block_indices, block_offsets), cache_k)
+            self.v_buffer[layer_id].index_put_((block_indices, block_offsets), cache_v)
 
 
 @torch.compile

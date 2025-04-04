@@ -53,7 +53,7 @@ class HPUAttnBackend(AttentionBackend):
 
         if save_kv_cache:
             forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer, forward_batch.out_cache_loc, k, v
+                layer, forward_batch.block_indices, forward_batch.block_offsets, k, v
             )
 
         query = q.view(1, -1, layer.tp_q_head_num, layer.qk_head_dim)
@@ -91,16 +91,24 @@ class HPUAttnBackend(AttentionBackend):
 
         if save_kv_cache:
             forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer, forward_batch.out_cache_loc, k, v
+                layer, forward_batch.block_indices, forward_batch.block_offsets, k, v
             )
+
 
         # Get key and value caches
         key_cache = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
         value_cache = forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id)
 
+        
         query = q.view(-1, 1, layer.tp_q_head_num * layer.qk_head_dim)
-        key_cache = key_cache.view(-1, forward_batch.page_size, layer.tp_k_head_num, layer.qk_head_dim)
-        value_cache = value_cache.view(-1, forward_batch.page_size, layer.tp_v_head_num, layer.v_head_dim)
+        # key_cache = key_cache.view(-1, forward_batch.page_size, layer.tp_k_head_num, layer.qk_head_dim)
+        # value_cache = value_cache.view(-1, forward_batch.page_size, layer.tp_v_head_num, layer.v_head_dim)
+
+        # if save_kv_cache:
+        #     key = k.view(-1, layer.tp_k_head_num, layer.qk_head_dim)
+        #     value = v.view(-1, layer.tp_v_head_num, layer.v_head_dim)
+        #     key_cache.index_put_((block_indices, block_offsets), key)
+        #     value_cache.index_put_((block_indices, block_offsets), value)
 
         # Run paged attention decode
         output = ops.flat_pa(
