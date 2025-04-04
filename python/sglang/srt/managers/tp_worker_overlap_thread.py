@@ -288,6 +288,33 @@ def create_hpu_specific_fields(ret: ModelWorkerBatch, model_runner):
         _init_block_metadata(ret, model_runner, block_tables, slot_mapping, block_size)
     return ret
 
+class TpModelWorkerClientSingelThread:
+
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        gpu_id: int,
+        tp_rank: int,
+        dp_rank: Optional[int],
+        nccl_port: int,
+    ):
+        # Load the model
+        self.worker = TpModelWorker(server_args, gpu_id, tp_rank, dp_rank, nccl_port)
+    
+    def forward_batch_generation(
+        self,
+        model_worker_batch: ModelWorkerBatch,
+        launch_done: Optional[threading.Event] = None,
+        skip_sample: bool = False,
+    ):
+        create_hpu_specific_fields(model_worker_batch, self.worker.model_runner)
+        return self.worker.forward_batch_generation(model_worker_batch, launch_done, skip_sample)
+    
+    def __getattr__(self, name):
+        return getattr(self.worker, name)
+        
+
+
 class TpModelWorkerClient:
     """A tensor parallel model worker."""
 
