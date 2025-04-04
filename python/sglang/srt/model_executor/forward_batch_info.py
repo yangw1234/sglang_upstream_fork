@@ -37,6 +37,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import os
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.utils import get_compiler_backend, is_hpu
@@ -179,9 +180,6 @@ def pad_list(input, k, v):
     return input + [v] * padding
 
 
-USE_CONTIGUOUS_PA = True
-
-
 @dataclass
 class ForwardBatch:
     """Store all inputs of a forward pass."""
@@ -294,6 +292,7 @@ class ForwardBatch:
 
     seq_pos: Optional[torch.Tensor] = None
     seq_idx: Optional[torch.Tensor] = None
+    use_contiguous_pa: bool = True
 
     @classmethod
     def _set_block_mapping(cls, metadata, batch_size, device, dtype):
@@ -345,7 +344,7 @@ class ForwardBatch:
         assert len(block_list) == len(block_groups)
         assert len(block_list) == len(block_usage)
 
-        if USE_CONTIGUOUS_PA:
+        if ret.use_contiguous_pa:
             # Pad block metadata if needed
             block_bucket_size = max(max(block_list) + 1, len(block_list))
             block_bucket_size = find_bucket(block_bucket_size, (DECODE_BLOCK_BUCKET_MIN, DECODE_BLOCK_BUCKET_STEP, DECODE_BLOCK_BUCKET_MAX))
@@ -499,6 +498,8 @@ class ForwardBatch:
                 ret.real_batch_size = ret.batch_size
                 ret.batch_size = 1
             else:
+                ret.use_contiguous_pa = os.environ.get('SGLANG_HPU_CONTIGUOUS_PA',
+                                                'true').lower() in ['true', '1']
                 # Initialize block metadata for HPU paged attention
                 from sglang.srt.mem_cache.paged_allocator import HPUPagedTokenToKVPoolAllocator
                 paged_allocator: HPUPagedTokenToKVPoolAllocator = model_runner.token_to_kv_pool_allocator
@@ -662,12 +663,13 @@ HPUForwardBatch = namedtuple(
         "block_scales",
         "attn_backend",
         "token_to_kv_pool",
+        "use_contiguous_pa"
         "input_embeds",
         "extend_return_logprob",
         "padded_static_len",
         "capture_hidden_mode",
     ],
-    defaults=[None, False, -1, CaptureHiddenMode.NULL],
+    defaults=[None, False, -1, CaptureHiddenMode.NULL, True],
 )
 
 def create_hpu_forward_batch(forward_batch: ForwardBatch):
@@ -690,6 +692,7 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch):
             block_scales=forward_batch.block_scales.to("hpu") if forward_batch.block_scales is not None else None,
             attn_backend=forward_batch.attn_backend,
             token_to_kv_pool=forward_batch.token_to_kv_pool,
+            use_contiguous_pa=forward_batch.use_contiguous_pa,
         )
 
 

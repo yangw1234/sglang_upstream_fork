@@ -102,11 +102,18 @@ class HPUAttnBackend(AttentionBackend):
         key_cache = key_cache.view(-1, forward_batch.page_size, layer.tp_k_head_num, layer.qk_head_dim)
         value_cache = value_cache.view(-1, forward_batch.page_size, layer.tp_v_head_num, layer.v_head_dim)
 
-        def fetch_key_cache(cache, blocks):
-            return cache[:blocks.size(0)]
-        
-        def fetch_value_cache(cache, blocks):
-            return cache[:blocks.size(0)]
+        if forward_batch.use_contiguous_pa:
+            def fetch_key_cache(cache, blocks):
+                return cache[:blocks.size(0)]
+
+            def fetch_value_cache(cache, blocks):
+                return cache[:blocks.size(0)]
+        else:
+            def fetch_key_cache(cache, blocks):
+                return cache.index_select(0, blocks)
+
+            def fetch_value_cache(cache, blocks):
+                return cache.index_select(0, blocks)
 
         # Run paged attention decode
         output = ops.flat_pa(
