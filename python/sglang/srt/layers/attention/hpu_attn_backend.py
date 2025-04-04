@@ -102,6 +102,12 @@ class HPUAttnBackend(AttentionBackend):
         key_cache = key_cache.view(-1, forward_batch.page_size, layer.tp_k_head_num, layer.qk_head_dim)
         value_cache = value_cache.view(-1, forward_batch.page_size, layer.tp_v_head_num, layer.v_head_dim)
 
+        def fetch_key_cache(cache, blocks):
+            return cache[:blocks.size(0)]
+        
+        def fetch_value_cache(cache, blocks):
+            return cache[:blocks.size(0)]
+
         # Run paged attention decode
         output = ops.flat_pa(
             query=query,
@@ -117,8 +123,8 @@ class HPUAttnBackend(AttentionBackend):
             matmul_av_op=self.matmul_av,
             batch2block_matmul_op=self.batch2block_matmul,
             block2batch_matmul_op=self.block2batch_matmul,
-            keys_fetch_func=self.k_cache.fetch_from_cache,
-            values_fetch_func=self.v_cache.fetch_from_cache,
+            keys_fetch_func=fetch_key_cache,
+            values_fetch_func=fetch_value_cache,
         )
 
         return output.reshape(-1, layer.tp_q_head_num * layer.v_head_dim)
