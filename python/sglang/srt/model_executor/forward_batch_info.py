@@ -663,13 +663,13 @@ HPUForwardBatch = namedtuple(
         "block_scales",
         "attn_backend",
         "token_to_kv_pool",
-        "use_contiguous_pa"
+        "use_contiguous_pa",
         "input_embeds",
         "extend_return_logprob",
         "padded_static_len",
         "capture_hidden_mode",
     ],
-    defaults=[None, False, -1, CaptureHiddenMode.NULL, True],
+    defaults=[None, False, -1, CaptureHiddenMode.NULL],
 )
 
 def create_hpu_forward_batch(forward_batch: ForwardBatch):
