@@ -37,6 +37,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import os
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.utils import get_compiler_backend, is_hpu
@@ -53,6 +54,17 @@ if TYPE_CHECKING:
 _PAD_SLOT_ID = 0
 _PAD_BLOCK_ID = 0
 
+PREFILL_BUCKET_MIN = 512
+PREFILL_BUCKET_STEP = 512
+PREFILL_BUCKET_MAX = 4096
+
+DECODE_BLOCK_BUCKET_MIN = 128
+DECODE_BLOCK_BUCKET_STEP = 128
+DECODE_BLOCK_BUCKET_MAX = 4096
+
+DECODE_BATCH_BUCKET_MIN = 1
+DECODE_BATCH_BUCKET_STEP = 32
+DECODE_BATCH_BUCKET_MAX = 192
 
 class ForwardMode(IntEnum):
     # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
@@ -168,9 +180,6 @@ def pad_list(input, k, v):
     return input + [v] * padding
 
 
-USE_CONTIGUOUS_PA = True
-
-
 @dataclass
 class ForwardBatch:
     """Store all inputs of a forward pass."""
@@ -281,6 +290,10 @@ class ForwardBatch:
 
     real_batch_size: Optional[int] = None
 
+    seq_pos: Optional[torch.Tensor] = None
+    seq_idx: Optional[torch.Tensor] = None
+    use_contiguous_pa: bool = True
+
     @classmethod
     def _set_block_mapping(cls, metadata, batch_size, device, dtype):
         """Set block mapping using one-hot encoding of block groups."""
@@ -314,7 +327,7 @@ class ForwardBatch:
     @classmethod
     def _init_block_metadata(cls, ret, model_runner, block_tables, slot_mapping, block_size):
         """Initialize block metadata for HPU paged attention."""
-        device = model_runner.device
+        device = "cpu"
         dtype = model_runner.dtype
 
         # Calculate block metadata
@@ -331,16 +344,16 @@ class ForwardBatch:
         assert len(block_list) == len(block_groups)
         assert len(block_list) == len(block_usage)
 
-        if USE_CONTIGUOUS_PA:
+        if ret.use_contiguous_pa:
             # Pad block metadata if needed
             block_bucket_size = max(max(block_list) + 1, len(block_list))
-            block_bucket_size = find_bucket(block_bucket_size, (128, 128, 2048))
+            block_bucket_size = find_bucket(block_bucket_size, (DECODE_BLOCK_BUCKET_MIN, DECODE_BLOCK_BUCKET_STEP, DECODE_BLOCK_BUCKET_MAX))
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
                 indices[bid] = i
             padding_fn = lambda tensor, pad_value: gather_list(tensor, indices, pad_value)
         else:
-            block_bucket_size = find_bucket(len(block_list), (128, 128, 2048))
+            block_bucket_size = find_bucket(len(block_list), (DECODE_BLOCK_BUCKET_MIN, DECODE_BLOCK_BUCKET_STEP, DECODE_BLOCK_BUCKET_MAX))
             padding_fn = lambda tensor, pad_value: pad_list(tensor, block_bucket_size, pad_value)
 
         block_list = padding_fn(block_list, _PAD_BLOCK_ID)
@@ -353,7 +366,7 @@ class ForwardBatch:
         ret.block_usage = torch.tensor(block_usage, dtype=dtype, device=device)
 
         # Set block mapping and scales
-        ret.block_mapping, ret.attn_bias, ret.block_groups = cls._set_block_mapping(ret, ret.input_ids.shape[0], device, dtype)
+        ret.block_mapping, ret.attn_bias, ret.block_groups = cls._set_block_mapping(ret, ret.batch_size, device, dtype)
         ret.block_scales = cls._set_block_scales(ret, device)
 
 
@@ -469,24 +482,28 @@ class ForwardBatch:
             ret.page_size = model_runner.token_to_kv_pool_allocator.page_size
             if ret.forward_mode.is_extend():
                 sum_seq_len = sum(seq_len_list)
-                max_prompt_len = find_bucket(sum_seq_len, (128, 128, 2048))
-                ret.attn_bias = cls.make_hpu_attn_bias(
+                max_prompt_len = find_bucket(sum_seq_len, (PREFILL_BUCKET_MIN, PREFILL_BUCKET_STEP, PREFILL_BUCKET_MAX))
+                ret.attn_bias, ret.seq_pos, ret.seq_idx = cls.make_hpu_attn_bias(
                     seq_lens=seq_len_list,
                     max_prompt_len=max_prompt_len,
                     dtype=model_runner.dtype,
-                ).to(model_runner.device)
+                )
                 padding_len = max_prompt_len - sum_seq_len
+                max_prefill_seqs = model_runner.server_args.max_running_requests
                 ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
                 ret.positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
                 ret.valid_seq_len = torch.tensor(sum_seq_len, dtype=torch.int32)
+                ret.extend_seq_lens = torch.nn.functional.pad(ret.extend_seq_lens, (0, max_prefill_seqs - ret.batch_size), value=0)
                 ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padding_len), value=0)
                 ret.real_batch_size = ret.batch_size
                 ret.batch_size = 1
             else:
+                ret.use_contiguous_pa = os.environ.get('SGLANG_HPU_CONTIGUOUS_PA',
+                                                'true').lower() in ['true', '1']
                 # Initialize block metadata for HPU paged attention
                 from sglang.srt.mem_cache.paged_allocator import HPUPagedTokenToKVPoolAllocator
                 paged_allocator: HPUPagedTokenToKVPoolAllocator = model_runner.token_to_kv_pool_allocator
-                padded_batch_size = find_bucket(ret.batch_size, (1, 32, 128))
+                padded_batch_size = find_bucket(ret.batch_size, (DECODE_BATCH_BUCKET_MIN, DECODE_BATCH_BUCKET_STEP, DECODE_BATCH_BUCKET_MAX))
                 block_tables = []
                 for i in range(ret.batch_size):
                     block_tables.append(paged_allocator.block_manager.seq_info[ret.req_pool_indices[i].item()][0])
@@ -494,17 +511,19 @@ class ForwardBatch:
                 for i in range(padded_batch_size - ret.batch_size):
                     block_tables.append([_PAD_BLOCK_ID])
 
-                ret.input_ids = torch.nn.functional.pad(ret.input_ids, (0, padded_batch_size), value=0)
-                ret.positions = torch.nn.functional.pad(ret.positions, (0, padded_batch_size), value=0)
+                padding_len = padded_batch_size - ret.batch_size
+                input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
+                positions = torch.nn.functional.pad(ret.positions, (0, padding_len), value=0)
                 ret.valid_seq_len = torch.ones(padded_batch_size, dtype=torch.int32)
-                ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padded_batch_size), value=0)
+                ret.out_cache_loc = torch.nn.functional.pad(ret.out_cache_loc, (0, padding_len), value=0)
                 ret.real_batch_size = ret.batch_size
-                ret.batch_size = padded_batch_size
+                
                 slot_mapping = ret.out_cache_loc
                 block_size = paged_allocator.page_size
-
+                ret.input_ids = input_ids
+                ret.positions = positions
+                ret.batch_size = padded_batch_size
                 cls._init_block_metadata(ret, model_runner, block_tables, slot_mapping, block_size)
-
         return ret
 
     @classmethod
@@ -521,16 +540,18 @@ class ForwardBatch:
                                   pad=-1,
                                   dtype=torch.long,
                                   flat=True)
-        q_seq_idx = seq_idx.unsqueeze(-1)
-        kv_seq_idx = seq_idx.unsqueeze(-2)
-        q_seq_pos = seq_pos.unsqueeze(-1)
-        kv_seq_pos = seq_pos.unsqueeze(-2)
-        seq_idx = q_seq_idx != kv_seq_idx
-        seq_pos = kv_seq_pos > q_seq_pos
-        attn_mask = seq_idx | seq_pos
-        attn_bias = torch.zeros_like(attn_mask, dtype=dtype)
-        attn_bias.masked_fill_(attn_mask, -math.inf)
-        return attn_bias.unsqueeze(1)
+        # q_seq_idx = seq_idx.unsqueeze(-1)
+        # kv_seq_idx = seq_idx.unsqueeze(-2)
+        # q_seq_pos = seq_pos.unsqueeze(-1)
+        # kv_seq_pos = seq_pos.unsqueeze(-2)
+        # seq_idx = q_seq_idx != kv_seq_idx
+        # seq_pos = kv_seq_pos > q_seq_pos
+        # attn_mask = seq_idx | seq_pos
+        
+        # attn_bias.masked_fill_(attn_mask, -math.inf)
+        # return attn_bias.unsqueeze(1)
+        attn_bias = torch.zeros(1, 1, max_prompt_len, max_prompt_len, dtype=dtype)
+        return attn_bias, seq_pos, seq_idx
 
     def get_merged_image_inputs(self) -> Optional[ImageInputs]:
         """
@@ -615,6 +636,64 @@ class ForwardBatch:
             axis=1,
         )
         self.mrope_positions = self.mrope_positions.to(torch.int64)
+
+from typing import Optional
+from torch import Tensor
+from dataclasses import dataclass
+from collections import namedtuple
+
+HPUForwardBatch = namedtuple(
+    "HPUForwardBatch",
+    [
+        "forward_mode",
+        "batch_size",
+        "input_ids",
+        "out_cache_loc",
+        "positions",
+        "attn_bias",
+        "seq_pos",
+        "seq_idx",
+        "valid_seq_len",
+        "extend_seq_lens",
+        "page_size",
+        "block_list",
+        "block_mapping",
+        "block_groups",
+        "block_usage",
+        "block_scales",
+        "attn_backend",
+        "token_to_kv_pool",
+        "use_contiguous_pa",
+        "input_embeds",
+        "extend_return_logprob",
+        "padded_static_len",
+        "capture_hidden_mode",
+    ],
+    defaults=[None, False, -1, CaptureHiddenMode.NULL],
+)
+
+def create_hpu_forward_batch(forward_batch: ForwardBatch):
+    return HPUForwardBatch(
+            forward_mode=forward_batch.forward_mode,
+            batch_size=forward_batch.batch_size,
+            input_ids=forward_batch.input_ids.to("hpu"),
+            out_cache_loc=forward_batch.out_cache_loc.to("hpu"),
+            positions=forward_batch.positions.to("hpu"),
+            attn_bias=forward_batch.attn_bias.to("hpu") if forward_batch.attn_bias is not None else None,
+            seq_pos=forward_batch.seq_pos.to("hpu") if forward_batch.seq_pos is not None else None,
+            seq_idx=forward_batch.seq_idx.to("hpu") if forward_batch.seq_idx is not None else None,
+            valid_seq_len=forward_batch.valid_seq_len.to("hpu") if forward_batch.valid_seq_len is not None else None,
+            extend_seq_lens=forward_batch.extend_seq_lens.to("hpu") if forward_batch.extend_seq_lens is not None else None,
+            page_size=forward_batch.page_size,
+            block_list=forward_batch.block_list.to("hpu") if forward_batch.block_list is not None else None,
+            block_mapping=forward_batch.block_mapping.to("hpu") if forward_batch.block_mapping is not None else None,
+            block_groups=forward_batch.block_groups.to("hpu") if forward_batch.block_groups is not None else None,
+            block_usage=forward_batch.block_usage.to("hpu") if forward_batch.block_usage is not None else None,
+            block_scales=forward_batch.block_scales.to("hpu") if forward_batch.block_scales is not None else None,
+            attn_backend=forward_batch.attn_backend,
+            token_to_kv_pool=forward_batch.token_to_kv_pool,
+            use_contiguous_pa=forward_batch.use_contiguous_pa,
+        )
 
 
 def compute_position_triton(

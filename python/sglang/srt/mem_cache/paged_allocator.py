@@ -21,6 +21,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import List, Optional, Tuple
+import heapq
 
 from sglang.srt.mem_cache.memory_pool import KVCache
 from sglang.srt.utils import get_bool_env_var, next_power_of_2
@@ -288,13 +289,16 @@ class BlockManager():
     def __init__(self, block_size, num_blocks):
         self.block_size = block_size
         self.num_blocks = num_blocks
+        # Use a heap for free blocks to always get the smallest block ID
         self.free_blocks = list(range(1, num_blocks))
+        heapq.heapify(self.free_blocks)
         self.req_to_block_ids = {}
         # Track sequence info: (block_ids, used_slots_in_last_block, slot_ids)
         self.seq_info = {}
 
     def clear(self):
         self.free_blocks = list(range(1, self.num_blocks))
+        heapq.heapify(self.free_blocks)
         self.req_to_block_ids = {}
         self.seq_info = {}
 
@@ -337,8 +341,8 @@ class BlockManager():
             if blocks_needed > len(self.free_blocks):
                 return None
 
-            new_blocks = self.free_blocks[:blocks_needed]
-            self.free_blocks = self.free_blocks[blocks_needed:]
+            # Get the smallest blocks using heap
+            new_blocks = [heapq.heappop(self.free_blocks) for _ in range(blocks_needed)]
 
             # Calculate slots in new blocks
             for i, block_id in enumerate(new_blocks):
@@ -374,7 +378,9 @@ class BlockManager():
         """
         if req_id in self.req_to_block_ids:
             freed_blocks = self.req_to_block_ids[req_id]
-            self.free_blocks.extend(freed_blocks)
+            # Push freed blocks back into the heap
+            for block in freed_blocks:
+                heapq.heappush(self.free_blocks, block)
             del self.req_to_block_ids[req_id]
             del self.seq_info[req_id]
 
