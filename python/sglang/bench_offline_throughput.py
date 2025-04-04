@@ -340,68 +340,69 @@ def throughput_test(
     # Warm up
     if not bench_args.skip_warmup:
         logging.info("\nWarmup...")
-        for i in range(1):
-            throughput_test_once(
-                backend_name=bench_args.backend,
-                backend=backend,
-                reqs=input_requests,
-                ignore_eos=not bench_args.disable_ignore_eos,
-                extra_request_body=extra_request_body,
-                profile=False,
-            )
-            time.sleep(0.5)
+        throughput_test_once(
+            backend_name=bench_args.backend,
+            backend=backend,
+            reqs=input_requests,
+            ignore_eos=not bench_args.disable_ignore_eos,
+            extra_request_body=extra_request_body,
+            profile=False,
+        )
+        time.sleep(0.5)
 
     logging.info("\nBenchmark...")
-    result = throughput_test_once(
-        backend_name=bench_args.backend,
-        backend=backend,
-        reqs=input_requests,
-        ignore_eos=not bench_args.disable_ignore_eos,
-        extra_request_body=extra_request_body,
-        profile=bench_args.profile,
-    )
+    for i in range(2):
+        result = throughput_test_once(
+            backend_name=bench_args.backend,
+            backend=backend,
+            reqs=input_requests,
+            ignore_eos=not bench_args.disable_ignore_eos,
+            extra_request_body=extra_request_body,
+            profile=bench_args.profile,
+        )
+        print(
+            "\n{s:{c}^{n}}".format(s=" Offline Throughput Benchmark Result ", n=50, c="=")
+        )
+        print("{:<40} {:<10}".format("Backend:", result["backend"]))
+        print("{:<40} {:<10}".format("Successful requests:", result["successful_requests"]))
+        print("{:<40} {:<10.2f}".format("Benchmark duration (s):", result["total_latency"]))
+        print("{:<40} {:<10}".format("Total input tokens:", result["total_input_tokens"]))
+        print(
+            "{:<40} {:<10}".format("Total generated tokens:", result["total_output_tokens"])
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Last generation throughput (tok/s):", result["last_gen_throughput"]
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Request throughput (req/s):", result["request_throughput"]
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Input token throughput (tok/s):", result["input_throughput"]
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Output token throughput (tok/s):", result["output_throughput"]
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Total token throughput (tok/s):", result["total_throughput"]
+            )
+        )
+        print("=" * 50)
     backend.shutdown()
 
     if bench_args.result_filename:
         with open(bench_args.result_filename, "a") as fout:
             fout.write(json.dumps(result) + "\n")
 
-    print(
-        "\n{s:{c}^{n}}".format(s=" Offline Throughput Benchmark Result ", n=50, c="=")
-    )
-    print("{:<40} {:<10}".format("Backend:", result["backend"]))
-    print("{:<40} {:<10}".format("Successful requests:", result["successful_requests"]))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):", result["total_latency"]))
-    print("{:<40} {:<10}".format("Total input tokens:", result["total_input_tokens"]))
-    print(
-        "{:<40} {:<10}".format("Total generated tokens:", result["total_output_tokens"])
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Last generation throughput (tok/s):", result["last_gen_throughput"]
-        )
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Request throughput (req/s):", result["request_throughput"]
-        )
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Input token throughput (tok/s):", result["input_throughput"]
-        )
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Output token throughput (tok/s):", result["output_throughput"]
-        )
-    )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Total token throughput (tok/s):", result["total_throughput"]
-        )
-    )
-    print("=" * 50)
+
 
     return result
 
