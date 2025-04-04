@@ -184,11 +184,15 @@ class TpModelWorker:
             ## TODO: Need to somehow pad the model_worker_batch so that sampling works
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
         htorch.core.mark_step()
-        next_token_ids = next_token_ids.to("cpu")
+        # next_token_ids = next_token_ids.to("cpu")
         next_token_ids = next_token_ids[:forward_batch.real_batch_size]
 
-        # TODO: Need to return logits_output in the future
-        return None, next_token_ids
+        logits_output_copy: LogitsProcessorOutput = LogitsProcessorOutput(
+            next_token_logits=next_token_ids,
+            # hidden_states=logits_output.hidden_states.to("cpu")[:forward_batch.real_batch_size] if logits_output.hidden_states is not None else None
+        )
+
+        return logits_output_copy, next_token_ids
 
     def forward_batch_embedding(self, model_worker_batch: ModelWorkerBatch):
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
