@@ -143,7 +143,7 @@ class ModelRunner:
         self.model_config = model_config
         self.mem_fraction_static = mem_fraction_static
         self.device = server_args.device
-        self.gpu_id = gpu_id
+        self.gpu_id = 0
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.dist_port = nccl_port

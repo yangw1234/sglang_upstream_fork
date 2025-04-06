@@ -69,7 +69,39 @@ class Llama4ForConditionalGeneration(nn.Module):
 
         return get_prefix_weights(), get_other_weights()
 
+    def permute_qk_weight_for_rotary(
+        self,
+        name: str,
+        loaded_weight: torch.Tensor,
+    ) -> Tuple[str, torch.Tensor]:
+
+        def permute(w: torch.Tensor, n_heads: int):
+            attn_in = self.language_model.config.head_dim * n_heads
+            attn_out = self.language_model.config.hidden_size
+
+            return (
+                w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
+                .transpose(1, 2)
+                .reshape(attn_in, attn_out)
+            )
+
+        modules = name.split(".")
+
+        # rotary embeds should be sliced
+        if ("wk" in modules or "k_proj" in modules) and modules[-1] == "weight":
+            loaded_weight = permute(
+                loaded_weight, self.language_model.config.num_key_value_heads
+            )
+        elif ("wq" in modules or "q_proj" in modules) and modules[-1] == "weight":
+            loaded_weight = permute(
+                loaded_weight, self.language_model.config.num_attention_heads
+            )
+
+        return name, loaded_weight
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+
+
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -82,8 +114,6 @@ class Llama4ForConditionalGeneration(nn.Module):
 
         params_dict = dict(self.named_parameters())
 
-        print(self.language_model)
-
         num_experts = self.config.text_config.num_local_experts
 
         for name, loaded_weight in weights:
@@ -92,6 +122,8 @@ class Llama4ForConditionalGeneration(nn.Module):
                 "multi_modal_projector"
             ):
                 continue
+
+            name, loaded_weight = self.permute_qk_weight_for_rotary(name, loaded_weight)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:    
                 if weight_name not in name:
@@ -119,7 +151,7 @@ class Llama4ForConditionalGeneration(nn.Module):
                     for name_, loaded_weight, shard_id in zip(
                         name_list, loaded_weight_list, shard_id_list
                     ):
-                        param = params_dict[name]
+                        param = params_dict[name_]
                         weight_loader = param.weight_loader
                         for expert_id in range(num_experts):
                             weight_loader(
