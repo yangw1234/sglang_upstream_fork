@@ -354,6 +354,7 @@ class FusedMoE(torch.nn.Module):
         use_presharded_weights: bool = False,
         inplace: bool = True,
         no_combine: bool = False,
+        apply_router_weight_on_input: bool = False,
     ):
         super().__init__()
 
