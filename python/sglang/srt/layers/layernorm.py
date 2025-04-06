@@ -42,9 +42,13 @@ class RMSNorm(CustomOp):
         self,
         hidden_size: int,
         eps: float = 1e-6,
+        dtype = None
     ) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        if dtype is not None:
+            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype))
+        else:
+            self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
     def forward_cuda(
