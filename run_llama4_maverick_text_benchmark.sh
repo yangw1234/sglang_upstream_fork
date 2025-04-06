@@ -1,5 +1,5 @@
 PT_HPU_ENABLE_LAZY_COLLECTIVES=true PT_HPU_LAZY_MODE=1 python3 -m sglang.bench_offline_throughput \
-    --model-path meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --model-path meta-llama/Llama-4-Maverick-17B-128E-Instruct \
     --num-prompts 128 \
     --random-input-len 1024\
     --random-output-len 1024 \
