@@ -149,6 +149,6 @@ class Llama4ForConditionalGeneration(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-
+            torch.hpu.synchronize()
 
 EntryClass = Llama4ForConditionalGeneration
