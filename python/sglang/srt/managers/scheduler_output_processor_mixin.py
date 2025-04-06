@@ -5,13 +5,15 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import BatchEmbeddingOut, BatchTokenIDOut
 from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
-
+from sglang.srt.utils import is_hpu
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
         EmbeddingBatchResult,
         GenerationBatchResult,
         ScheduleBatch,
     )
+
+_is_hpu = is_hpu()
 
 
 class SchedulerOutputProcessorMixin:
@@ -66,6 +68,7 @@ class SchedulerOutputProcessorMixin:
                     continue
 
                 if self.is_mixed_chunk and self.enable_overlap and req.finished():
+                    raise NotImplementedError("Not implemented for mixed chunk")
                     # Free the one delayed token for the mixed decode batch
                     j = len(batch.out_cache_loc) - len(batch.reqs) + i
                     self.token_to_kv_pool_allocator.free(batch.out_cache_loc[j : j + 1])
@@ -208,7 +211,7 @@ class SchedulerOutputProcessorMixin:
                 # Free the one extra delayed token
                 if self.page_size == 1:
                     self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
-                else:
+                elif not _is_hpu:
                     # Only free when the extra token is in a new page
                     if (
                         len(req.origin_input_ids) + len(req.output_ids) - 1
@@ -216,6 +219,9 @@ class SchedulerOutputProcessorMixin:
                         self.token_to_kv_pool_allocator.free(
                             batch.out_cache_loc[i : i + 1]
                         )
+                else:
+                    # TODO: review this to make sure it is correct
+                    pass
                 continue
 
             if batch.spec_algorithm.is_none():
