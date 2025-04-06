@@ -1,6 +1,5 @@
 # TODO: add Aapted from vllm/mllama4.py
 from collections.abc import Iterable
-from itertools import tee
 from typing import Optional, Set, Tuple
 
 import torch
@@ -50,25 +49,6 @@ class Llama4ForConditionalGeneration(nn.Module):
 
         return self.language_model(input_ids, positions, forward_batch)
 
-    def _separate_weights(
-        self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-        prefix: str,
-    ) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str, torch.Tensor]]]:
-        weights1, weights2 = tee(weights, 2)
-
-        def get_prefix_weights() -> Iterable[Tuple[str, torch.Tensor]]:
-            for name, data in weights1:
-                if name.startswith(prefix):
-                    yield (name, data)
-
-        def get_other_weights() -> Iterable[Tuple[str, torch.Tensor]]:
-            for name, data in weights2:
-                if not name.startswith(prefix):
-                    yield (name, data)
-
-        return get_prefix_weights(), get_other_weights()
-
     def permute_qk_weight_for_rotary(
         self,
         name: str,
@@ -101,8 +81,6 @@ class Llama4ForConditionalGeneration(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
 
-
-
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
@@ -110,6 +88,8 @@ class Llama4ForConditionalGeneration(nn.Module):
             (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
             (".shared_expert.gate_up_proj", ".shared_expert.gate_proj", 0),
             (".shared_expert.gate_up_proj", ".shared_expert.up_proj", 1),
+            (".feed_forward.gate_up_proj", ".feed_forward.gate_proj", 0),
+            (".feed_forward.gate_up_proj", ".feed_forward.up_proj", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -125,7 +105,7 @@ class Llama4ForConditionalGeneration(nn.Module):
 
             name, loaded_weight = self.permute_qk_weight_for_rotary(name, loaded_weight)
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:    
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -147,17 +127,16 @@ class Llama4ForConditionalGeneration(nn.Module):
                         ]
                         shard_id_list = ["w2"]
                         loaded_weight_list = [loaded_weight]
-
-                    for name_, loaded_weight, shard_id in zip(
+                    for name, loaded_weight, shard_id in zip(
                         name_list, loaded_weight_list, shard_id_list
                     ):
-                        param = params_dict[name_]
+                        param = params_dict[name]
                         weight_loader = param.weight_loader
                         for expert_id in range(num_experts):
                             weight_loader(
                                 param,
                                 loaded_weight[expert_id].T,
-                                name_,
+                                name,
                                 shard_id=shard_id,
                                 expert_id=expert_id,
                             )
