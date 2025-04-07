@@ -61,11 +61,13 @@ class HPUAttnBackend(AttentionBackend):
         value = v.view(1, -1, layer.tp_v_head_num, layer.v_head_dim)
 
         output = ops.prompt_attention(
-            query,
-            key,
-            value,
+            "fsdpa",
+            query=query,
+            key=key,
+            value=value,
             attn_bias=forward_batch.attn_bias,
             p=0.0,
+            is_causal=True,
             scale=layer.scaling,
             matmul_qk_op=self.matmul_qk,
             softmax_op=self.softmax,

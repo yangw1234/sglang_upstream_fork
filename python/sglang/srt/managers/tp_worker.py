@@ -187,8 +187,7 @@ class TpModelWorker:
         next_token_ids = next_token_ids.to("cpu")
         next_token_ids = next_token_ids[:forward_batch.real_batch_size]
 
-        # TODO: Need to return logits_output in the future
-        return None, next_token_ids
+        return logits_output, next_token_ids
 
     def forward_batch_embedding(self, model_worker_batch: ModelWorkerBatch):
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
