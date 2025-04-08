@@ -244,7 +244,7 @@ class ServerArgs:
 
         # Choose kernel backends
         if self.device == "hpu":
-            self.attention_backend = "torch_native"
+            self.attention_backend = "hpu"
             self.sampling_backend = "pytorch"
 
         if self.attention_backend is None:
@@ -310,6 +310,9 @@ class ServerArgs:
         # AMD-specific Triton attention KV splits default number
         if is_hip():
             self.triton_attention_num_kv_splits = 16
+        
+        if self.max_running_requests is None:
+            self.max_running_requests = 128
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):

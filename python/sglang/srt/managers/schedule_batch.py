@@ -524,7 +524,6 @@ class Req:
 
 bid = 0
 
-
 @dataclasses.dataclass
 class ScheduleBatch:
     """Store all information of a batch on the scheduler."""
@@ -948,7 +947,7 @@ class ScheduleBatch:
         self.extend_input_logprob_token_ids = extend_input_logprob_token_ids
 
         # Write to req_to_token_pool
-        if global_server_args_dict["attention_backend"] != "torch_native":
+        if global_server_args_dict["attention_backend"] not in ["torch_native", "hpu"]:
             # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
 
             write_req_to_token_pool_triton[(bs,)](
@@ -1432,6 +1431,25 @@ class ModelWorkerBatch:
     spec_info: Optional[Union[EagleVerifyInput, EagleDraftInput]] = None
     # If set, the output of the batch contains the hidden states of the run.
     capture_hidden_mode: CaptureHiddenMode = None
+
+    positions: Optional[torch.Tensor] = None
+    batch_size: Optional[int] = None
+    extend_start_loc: Optional[torch.Tensor] = None
+
+    # HPU-specific fields
+    page_size: Optional[int] = None
+    attn_bias: Optional[torch.Tensor] = None
+    seq_pos: Optional[torch.Tensor] = None
+    seq_idx: Optional[torch.Tensor] = None
+    valid_seq_len: Optional[torch.Tensor] = None
+    extend_seq_lens_padded: Optional[torch.Tensor] = None
+    real_batch_size: Optional[int] = None
+    use_contiguous_pa: Optional[bool] = None
+    block_list: Optional[torch.Tensor] = None
+    block_mapping: Optional[torch.Tensor] = None
+    block_groups: Optional[torch.Tensor] = None
+    block_usage: Optional[torch.Tensor] = None
+    block_scales: Optional[torch.Tensor] = None
 
 
 @triton.jit

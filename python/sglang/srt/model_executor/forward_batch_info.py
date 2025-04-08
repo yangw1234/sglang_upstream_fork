@@ -37,6 +37,8 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import os
+import math
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.utils import get_compiler_backend, is_hpu
@@ -97,7 +99,10 @@ class ForwardMode(IntEnum):
     def is_draft_extend(self):
         return self == ForwardMode.DRAFT_EXTEND
 
-    def is_cuda_graph(self):
+    def is_cuda_graph(self, device: str = "cuda"):
+        if device == "hpu":
+            # hpu will always use graph runner
+            return True
         return (
             self == ForwardMode.DECODE
             or self == ForwardMode.TARGET_VERIFY
@@ -223,13 +228,34 @@ class ForwardBatch:
     # For Qwen2-VL
     mrope_positions: torch.Tensor = None
 
+    attn_bias: Optional[torch.Tensor] = None
+
+    valid_seq_len: Optional[torch.Tensor] = None
+
+    page_size: Optional[int] = None
+
+    # For HPU paged attention
+    block_list: Optional[torch.Tensor] = None
+    block_mapping: Optional[torch.Tensor] = None
+    block_usage: Optional[torch.Tensor] = None
+    block_scales: Optional[torch.Tensor] = None
+    block_groups: Optional[torch.Tensor] = None
+
+    real_batch_size: Optional[int] = None
+
+    seq_pos: Optional[torch.Tensor] = None
+    seq_idx: Optional[torch.Tensor] = None
+    use_contiguous_pa: bool = True
+
+
     @classmethod
     def init_new(
         cls,
         batch: ModelWorkerBatch,
         model_runner: ModelRunner,
     ):
-        device = model_runner.device
+        # device = model_runner.device
+        device = "cpu"
         extend_input_logprob_token_ids_gpu = None
         if batch.extend_input_logprob_token_ids is not None:
             extend_input_logprob_token_ids_gpu = (
@@ -295,30 +321,9 @@ class ForwardBatch:
 
         # Init position information
         if ret.forward_mode.is_decode():
-            if ret.positions is None:
-                ret.positions = clamp_position(batch.seq_lens)
             if ret.decode_seq_lens_cpu is None:
                 ret.decode_seq_lens_cpu = batch.decode_seq_lens
         else:
-            ret.extend_seq_lens = torch.tensor(
-                batch.extend_seq_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
-            ret.extend_prefix_lens = torch.tensor(
-                batch.extend_prefix_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
-            if model_runner.server_args.attention_backend != "torch_native":
-                ret.extend_num_tokens = batch.extend_num_tokens
-                positions, ret.extend_start_loc = compute_position_triton(
-                    ret.extend_prefix_lens,
-                    ret.extend_seq_lens,
-                    ret.extend_num_tokens,
-                )
-            else:
-                positions, ret.extend_start_loc = compute_position_torch(
-                    ret.extend_prefix_lens, ret.extend_seq_lens
-                )
-            if ret.positions is None:
-                ret.positions = positions
             ret.extend_prefix_lens_cpu = batch.extend_prefix_lens
             ret.extend_seq_lens_cpu = batch.extend_seq_lens
             ret.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens
@@ -330,6 +335,24 @@ class ForwardBatch:
         if model_runner.server_args.lora_paths is not None:
             model_runner.lora_manager.prepare_lora_batch(ret)
 
+        
+        if model_runner.server_args.attention_backend == "hpu":
+            ret.positions = batch.positions
+            ret.batch_size = batch.batch_size
+            ret.extend_start_loc = batch.extend_start_loc
+            ret.page_size = batch.page_size
+            ret.attn_bias = batch.attn_bias
+            ret.seq_pos = batch.seq_pos
+            ret.seq_idx = batch.seq_idx
+            ret.valid_seq_len = batch.valid_seq_len
+            ret.extend_seq_lens = batch.extend_seq_lens_padded
+            ret.block_list = batch.block_list
+            ret.block_mapping = batch.block_mapping
+            ret.block_groups = batch.block_groups
+            ret.block_usage = batch.block_usage
+            ret.block_scales = batch.block_scales
+            ret.use_contiguous_pa = batch.use_contiguous_pa
+            ret.real_batch_size = batch.real_batch_size
         return ret
 
     def get_merged_image_inputs(self) -> Optional[ImageInputs]:
@@ -415,6 +438,64 @@ class ForwardBatch:
             axis=1,
         )
         self.mrope_positions = self.mrope_positions.to(torch.int64)
+
+from typing import Optional
+from torch import Tensor
+from dataclasses import dataclass
+from collections import namedtuple
+
+HPUForwardBatch = namedtuple(
+    "HPUForwardBatch",
+    [
+        "forward_mode",
+        "batch_size",
+        "input_ids",
+        "out_cache_loc",
+        "positions",
+        "attn_bias",
+        "seq_pos",
+        "seq_idx",
+        "valid_seq_len",
+        "extend_seq_lens",
+        "page_size",
+        "block_list",
+        "block_mapping",
+        "block_groups",
+        "block_usage",
+        "block_scales",
+        "attn_backend",
+        "token_to_kv_pool",
+        "use_contiguous_pa",
+        "input_embeds",
+        "extend_return_logprob",
+        "padded_static_len",
+        "capture_hidden_mode",
+    ],
+    defaults=[None, False, -1, CaptureHiddenMode.NULL],
+)
+
+def create_hpu_forward_batch(forward_batch: ForwardBatch):
+    return HPUForwardBatch(
+            forward_mode=forward_batch.forward_mode,
+            batch_size=forward_batch.batch_size,
+            input_ids=forward_batch.input_ids.to("hpu"),
+            out_cache_loc=forward_batch.out_cache_loc.to("hpu"),
+            positions=forward_batch.positions.to("hpu"),
+            attn_bias=forward_batch.attn_bias.to("hpu") if forward_batch.attn_bias is not None else None,
+            seq_pos=forward_batch.seq_pos.to("hpu") if forward_batch.seq_pos is not None else None,
+            seq_idx=forward_batch.seq_idx.to("hpu") if forward_batch.seq_idx is not None else None,
+            valid_seq_len=forward_batch.valid_seq_len.to("hpu") if forward_batch.valid_seq_len is not None else None,
+            extend_seq_lens=forward_batch.extend_seq_lens.to("hpu") if forward_batch.extend_seq_lens is not None else None,
+            page_size=forward_batch.page_size,
+            block_list=forward_batch.block_list.to("hpu") if forward_batch.block_list is not None else None,
+            block_mapping=forward_batch.block_mapping.to("hpu") if forward_batch.block_mapping is not None else None,
+            block_groups=forward_batch.block_groups.to("hpu") if forward_batch.block_groups is not None else None,
+            block_usage=forward_batch.block_usage.to("hpu") if forward_batch.block_usage is not None else None,
+            block_scales=forward_batch.block_scales.to("hpu") if forward_batch.block_scales is not None else None,
+            attn_backend=forward_batch.attn_backend,
+            token_to_kv_pool=forward_batch.token_to_kv_pool,
+            use_contiguous_pa=forward_batch.use_contiguous_pa,
+        )
 
 
 def compute_position_triton(
