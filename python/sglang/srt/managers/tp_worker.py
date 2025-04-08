@@ -176,7 +176,6 @@ class TpModelWorker:
         if skip_sample:
             next_token_ids = None
         else:
-            ## TODO: Need to somehow pad the model_worker_batch so that sampling works
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
 
         return logits_output, next_token_ids

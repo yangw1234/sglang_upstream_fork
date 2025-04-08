@@ -95,16 +95,23 @@ class HPUGraphRunner:
         # TODO: implement warmup
         pass
 
+    def _forward(self, forward_batch: ForwardBatch):
+        from sglang.srt.model_executor.forward_batch_info import create_hpu_forward_batch
+        import habana_frameworks.torch as htorch
+
+        forward_batch_hpu = create_hpu_forward_batch(forward_batch)
+        results = self.model.forward(forward_batch_hpu.input_ids, forward_batch_hpu.positions, forward_batch_hpu)
+        htorch.core.mark_step()
+        logits_output = LogitsProcessorOutput(
+            next_token_logits=results.next_token_logits.clone()[:forward_batch.real_batch_size],
+            hidden_states=results.hidden_states.clone()[:forward_batch.real_batch_size] if results.hidden_states is not None else None,
+        )
+
+        return logits_output
+
     def replay(
         self, forward_batch: ForwardBatch, skip_attn_backend_init: bool = False
     ) -> LogitsProcessorOutput:
         if not skip_attn_backend_init:
             self.model_runner.attn_backend.init_forward_metadata(forward_batch)
-        
-        logits_output = self.model.forward(forward_batch.input_ids, forward_batch.positions, forward_batch)
-
-        logits_output = LogitsProcessorOutput(
-            next_token_logits=logits_output.next_token_logits.clone(),
-            hidden_states=logits_output.hidden_states.clone() if logits_output.hidden_states is not None else None,
-        )
-        return logits_output
+        return self._forward(forward_batch)
