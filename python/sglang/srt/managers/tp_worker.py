@@ -169,26 +169,16 @@ class TpModelWorker:
         skip_sample: bool = False,
     ) -> Tuple[LogitsProcessorOutput, Optional[torch.Tensor]]:
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
-        from sglang.srt.model_executor.forward_batch_info import create_hpu_forward_batch
-        hpu_forward_batch = create_hpu_forward_batch(forward_batch)
-        import habana_frameworks.torch as htorch
-        htorch.core.mark_step()
-        logits_output = self.model_runner.forward(hpu_forward_batch)
-        htorch.core.mark_step()
+        logits_output = self.model_runner.forward(forward_batch)
         if launch_done:
             launch_done.set()
 
         if skip_sample:
             next_token_ids = None
         else:
-            ## TODO: Need to somehow pad the model_worker_batch so that sampling works
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
-        htorch.core.mark_step()
-        next_token_ids = next_token_ids.to("cpu")
-        next_token_ids = next_token_ids[:forward_batch.real_batch_size]
 
-        # TODO: Need to return logits_output in the future
-        return None, next_token_ids
+        return logits_output, next_token_ids
 
     def forward_batch_embedding(self, model_worker_batch: ModelWorkerBatch):
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)

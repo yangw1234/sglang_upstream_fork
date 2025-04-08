@@ -53,9 +53,10 @@ from sglang.srt.mem_cache.memory_pool import (
     ReqToTokenPool,
     TokenToKVPoolAllocator,
 )
-from sglang.srt.mem_cache.paged_allocator import PagedTokenToKVPoolAllocator, HPUPagedTokenToKVPoolAllocator
+from sglang.srt.mem_cache.paged_allocator import PagedTokenToKVPoolAllocator
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.hpu_graph_runner import HPUGraphRunner
 from sglang.srt.model_loader import get_model
 from sglang.srt.model_loader.loader import (
     DefaultModelLoader,
@@ -86,42 +87,6 @@ logger = logging.getLogger(__name__)
 
 SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
 UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
-
-import math
-
-def make_hpu_attn_bias(seq_pos, seq_idx, dtype):
-    q_seq_idx = seq_idx.unsqueeze(-1)
-    kv_seq_idx = seq_idx.unsqueeze(-2)
-    q_seq_pos = seq_pos.unsqueeze(-1)
-    kv_seq_pos = seq_pos.unsqueeze(-2)
-    seq_idx = q_seq_idx != kv_seq_idx
-    seq_pos = kv_seq_pos > q_seq_pos
-    attn_mask = seq_idx | seq_pos
-    attn_bias = torch.zeros_like(attn_mask, dtype=dtype)
-    attn_bias.masked_fill_(attn_mask, -math.inf)
-    return attn_bias.unsqueeze(1)
-    
-
-class HPUAdapter:
-
-    def __init__(self, model, dtype) -> None:
-        self.model = model
-        self.dtype = dtype
-    
-
-    def __getattr__(self, name):
-        return getattr(self.model, name)
-
-    def forward(self, *args, **kwargs):
-        assert len(args) == 3, "Only three arguments are supported"
-        input_batch = args[2]
-        if input_batch.forward_mode.is_extend():
-            input_batch.attn_bias.copy_(make_hpu_attn_bias(input_batch.seq_pos, input_batch.seq_idx, self.dtype))
-        return self.model(*args, **kwargs)
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
-
 
 class ModelRunner:
     """ModelRunner runs the forward passes of the models."""
@@ -212,13 +177,6 @@ class ModelRunner:
         self.sampler = Sampler()
         self.load_model()
 
-
-        import habana_frameworks.torch as htorch
-        self.model = htorch.hpu.wrap_in_hpu_graph(
-            HPUAdapter(self.model, self.dtype),
-            disable_tensor_cache=True,
-        ) if htorch.utils.internal.is_lazy() else HPUAdapter(self.model, self.dtype)
-
         # Apply torchao quantization
         torchao_applied = getattr(self.model, "torchao_applied", False)
         # In layered loading, torchao may have been applied
@@ -249,6 +207,9 @@ class ModelRunner:
             self.init_cublas()
             self.init_attention_backend()
             self.init_cuda_graphs()
+        elif self.device == "hpu":
+            self.cuda_graph_runner = HPUGraphRunner(self)
+            self.init_attention_backend()
         else:
             self.cuda_graph_runner = None
             self.init_attention_backend()
@@ -829,22 +790,13 @@ class ModelRunner:
                     kvcache=self.token_to_kv_pool,
                 )
             else:
-                if is_hpu():
-                    self.token_to_kv_pool_allocator = HPUPagedTokenToKVPoolAllocator(
-                        self.max_total_num_tokens,
-                        page_size=self.page_size,
-                        dtype=self.kv_cache_dtype,
-                        device=self.device if self.device != "hpu" else "cpu",
-                        kvcache=self.token_to_kv_pool,
-                    )
-                else:
-                    self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
-                        self.max_total_num_tokens,
-                        page_size=self.page_size,
-                        dtype=self.kv_cache_dtype,
-                        device=self.device,
-                        kvcache=self.token_to_kv_pool,
-                    )
+                self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
+                    self.max_total_num_tokens,
+                    page_size=self.page_size,
+                    dtype=self.kv_cache_dtype,
+                    device=self.device if self.device != "hpu" else "cpu",
+                    kvcache=self.token_to_kv_pool,
+                )
         else:
             assert self.is_draft_worker
 
@@ -1008,7 +960,7 @@ class ModelRunner:
         self, forward_batch: ForwardBatch, skip_attn_backend_init: bool = False
     ) -> LogitsProcessorOutput:
         if (
-            forward_batch.forward_mode.is_cuda_graph()
+            forward_batch.forward_mode.is_cuda_graph(self.device)
             and self.cuda_graph_runner
             and self.cuda_graph_runner.can_run(forward_batch)
         ):
