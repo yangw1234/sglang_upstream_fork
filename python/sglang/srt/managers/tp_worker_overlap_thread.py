@@ -260,19 +260,21 @@ def create_hpu_specific_fields(ret: ModelWorkerBatch, model_runner):
         req_token_pool: ReqToTokenPool = model_runner.req_to_token_pool
         padded_batch_size = find_bucket(batch_size, (DECODE_BATCH_BUCKET_MIN, DECODE_BATCH_BUCKET_STEP, DECODE_BATCH_BUCKET_MAX))
         block_tables = []
+        slots_list = []
         for i in range(batch_size):
             slots = req_token_pool.req_to_token[ret.req_pool_indices[i], :ret.seq_lens[i]]
             last_loc = slots[-1]
-            num_full_tables = ret.seq_lens[i] // page_size
+            num_full_tables = (ret.seq_lens[i] - 1) // page_size
             ranges = torch.arange(0, num_full_tables*page_size, step=page_size, device=ret.input_ids.device)
             pages = slots[ranges] // page_size
             pages = pages.flatten().tolist()
             if last_loc % page_size != 0:
-                pages.append(last_loc // page_size)
+                pages.append((last_loc // page_size).item())
             block_tables.append(pages)
-    
+            slots_list.append(slots)
         for i in range(padded_batch_size - batch_size):
             block_tables.append([_PAD_BLOCK_ID])
+        print(f"ret.out_cache_loc: {ret.out_cache_loc}")
 
         padding_len = padded_batch_size - len(ret.seq_lens)
         input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
