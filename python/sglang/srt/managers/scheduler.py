@@ -299,7 +299,7 @@ class Scheduler(SchedulerOutputProcessorMixin):
         self.return_health_check_ct = 0
         self.current_stream = torch.get_device_module(self.device).current_stream()
         if self.device == "cpu":
-             self.current_stream.synchronize = lambda: None  # No-op for CPU
+            self.current_stream.synchronize = lambda: None  # No-op for CPU
 
         # Init session info
         self.sessions: Dict[str, Session] = {}
