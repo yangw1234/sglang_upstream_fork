@@ -261,6 +261,9 @@ class Scheduler(SchedulerOutputProcessorMixin):
             _,
             _,
         ) = self.tp_worker.get_worker_info()
+        if self.device == "hpu":
+            # scheduler will run on cpu if hpu is used
+            self.device = "cpu"
         self.tp_cpu_group = self.tp_worker.get_tp_cpu_group()
         self.attn_tp_cpu_group = self.tp_worker.get_attention_tp_cpu_group()
         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
@@ -294,9 +297,9 @@ class Scheduler(SchedulerOutputProcessorMixin):
         self.last_decode_stats_tic = time.time()
         self.last_prefill_stats_tic = time.time()
         self.return_health_check_ct = 0
-        self.current_stream = torch.get_device_module("cpu").current_stream()
-        # if self.device == "cpu":
-        self.current_stream.synchronize = lambda: None  # No-op for CPU
+        self.current_stream = torch.get_device_module(self.device).current_stream()
+        if self.device == "cpu":
+             self.current_stream.synchronize = lambda: None  # No-op for CPU
 
         # Init session info
         self.sessions: Dict[str, Session] = {}

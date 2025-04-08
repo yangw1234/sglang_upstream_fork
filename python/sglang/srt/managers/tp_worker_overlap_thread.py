@@ -330,7 +330,7 @@ class TpModelWorkerClient:
         # Load the model
         self.worker = TpModelWorker(server_args, gpu_id, tp_rank, dp_rank, nccl_port)
         self.max_running_requests = self.worker.max_running_requests
-        self.device = self.worker.device
+        self.device = self.worker.device if self.worker.device != "hpu" else "cpu"
         self.gpu_id = gpu_id
 
         # Init future mappings
@@ -343,7 +343,7 @@ class TpModelWorkerClient:
         # Launch threads
         self.input_queue = Queue()
         self.output_queue = Queue()
-        self.forward_stream = torch.get_device_module(self.device).Stream()
+        self.forward_stream = torch.get_device_module(self.worker.device).Stream()
         self.forward_thread = threading.Thread(
             target=self.forward_thread_func,
         )
@@ -401,10 +401,7 @@ class TpModelWorkerClient:
 
             # Create event
             self.launch_done = threading.Event()
-            if not _is_hpu:
-                copy_done = torch.get_device_module(self.device).Event()
-            else:
-                copy_done = None
+            copy_done = torch.get_device_module(self.device).Event()
 
             # Resolve future tokens in the input
             input_ids = model_worker_batch.input_ids
@@ -435,15 +432,13 @@ class TpModelWorkerClient:
                     "cpu", non_blocking=True
                 )
             next_token_ids = next_token_ids.to("cpu", non_blocking=True)
-            if copy_done is not None:
-                copy_done.record()
+            copy_done.record()
 
             self.output_queue.put((copy_done, logits_output, next_token_ids))
 
     def resolve_batch_result(self, bid: int):
         copy_done, logits_output, next_token_ids = self.output_queue.get()
-        if copy_done is not None:
-            copy_done.synchronize()
+        copy_done.synchronize()
         self.launch_done.wait()
 
         if logits_output.next_token_logprobs is not None:
@@ -470,8 +465,7 @@ class TpModelWorkerClient:
         create_hpu_specific_fields(model_worker_batch, self.worker.model_runner)
 
         # A cuda stream sync here to avoid the cuda illegal memory access error.
-        if not _is_hpu:
-            self.scheduler_stream.synchronize()
+        self.scheduler_stream.synchronize()
 
         # Push a new batch to the queue
         self.input_queue.put((model_worker_batch, self.future_token_ids_ct))
@@ -483,7 +477,7 @@ class TpModelWorkerClient:
             -(self.future_token_ids_ct + 1 + bs),
             -1,
             dtype=torch.int64,
-            device="cpu",
+            device=self.device,
         )
         self.future_token_ids_ct = (
             self.future_token_ids_ct + bs
