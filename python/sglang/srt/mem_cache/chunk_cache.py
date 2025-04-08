@@ -39,10 +39,7 @@ class ChunkCache(BasePrefixCache):
             req.req_pool_idx, : len(req.origin_input_ids) + len(req.output_ids) - 1
         ]
         self.req_to_token_pool.free(req.req_pool_idx)
-        if is_hpu():
-            self.token_to_kv_pool_allocator.free(req.req_pool_idx)
-        else:
-            self.token_to_kv_pool_allocator.free(kv_indices)
+        self.token_to_kv_pool_allocator.free(kv_indices)
 
     def cache_unfinished_req(self, req: Req):
         kv_indices = self.req_to_token_pool.req_to_token[

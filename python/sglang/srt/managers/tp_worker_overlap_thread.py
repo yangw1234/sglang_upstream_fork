@@ -254,22 +254,23 @@ def create_hpu_specific_fields(ret: ModelWorkerBatch, model_runner):
         ret.use_contiguous_pa = os.environ.get('SGLANG_HPU_CONTIGUOUS_PA',
                                         'true').lower() in ['true', '1']
         batch_size = len(ret.seq_lens)
+        page_size = model_runner.token_to_kv_pool_allocator.page_size
         # Initialize block metadata for HPU paged attention
-        from sglang.srt.mem_cache.paged_allocator import HPUPagedTokenToKVPoolAllocator
-        paged_allocator: HPUPagedTokenToKVPoolAllocator = model_runner.token_to_kv_pool_allocator
+        from sglang.srt.managers.schedule_batch import ReqToTokenPool
+        req_token_pool: ReqToTokenPool = model_runner.req_to_token_pool
         padded_batch_size = find_bucket(batch_size, (DECODE_BATCH_BUCKET_MIN, DECODE_BATCH_BUCKET_STEP, DECODE_BATCH_BUCKET_MAX))
         block_tables = []
         for i in range(batch_size):
-            try:
-                block_tables.append(paged_allocator.block_manager.seq_info[ret.req_pool_indices[i].item()][0])
-            except Exception as e:
-                print(f"Error: {e}")
-                print(f"ret.req_pool_indices[i].item(): {ret.req_pool_indices[i].item()}")
-                print(f"paged_allocator.block_manager.seq_info: {paged_allocator.block_manager.seq_info}")
-                print(f"ret.input_ids: {ret.input_ids}")
-                print(f"")
-                raise e
-
+            slots = req_token_pool.req_to_token[ret.req_pool_indices[i], :ret.seq_lens[i]]
+            last_loc = slots[-1]
+            num_full_tables = ret.seq_lens[i] // page_size
+            ranges = torch.arange(0, num_full_tables*page_size, step=page_size, device=ret.input_ids.device)
+            pages = slots[ranges] // page_size
+            pages = pages.flatten().tolist()
+            if last_loc % page_size != 0:
+                pages.append(last_loc // page_size)
+            block_tables.append(pages)
+    
         for i in range(padded_batch_size - batch_size):
             block_tables.append([_PAD_BLOCK_ID])
 
@@ -281,11 +282,10 @@ def create_hpu_specific_fields(ret: ModelWorkerBatch, model_runner):
         ret.real_batch_size = len(ret.seq_lens)
         
         slot_mapping = ret.out_cache_loc
-        block_size = paged_allocator.page_size
         ret.input_ids = input_ids
         ret.positions = positions
         ret.batch_size = padded_batch_size
-        _init_block_metadata(ret, model_runner, block_tables, slot_mapping, block_size)
+        _init_block_metadata(ret, model_runner, block_tables, slot_mapping, page_size)
     return ret
 
 class TpModelWorkerClientSingelThread:

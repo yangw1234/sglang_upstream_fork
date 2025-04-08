@@ -829,22 +829,13 @@ class ModelRunner:
                     kvcache=self.token_to_kv_pool,
                 )
             else:
-                if is_hpu():
-                    self.token_to_kv_pool_allocator = HPUPagedTokenToKVPoolAllocator(
-                        self.max_total_num_tokens,
-                        page_size=self.page_size,
-                        dtype=self.kv_cache_dtype,
-                        device=self.device if self.device != "hpu" else "cpu",
-                        kvcache=self.token_to_kv_pool,
-                    )
-                else:
-                    self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
-                        self.max_total_num_tokens,
-                        page_size=self.page_size,
-                        dtype=self.kv_cache_dtype,
-                        device=self.device,
-                        kvcache=self.token_to_kv_pool,
-                    )
+                self.token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
+                    self.max_total_num_tokens,
+                    page_size=self.page_size,
+                    dtype=self.kv_cache_dtype,
+                    device=self.device if self.device != "hpu" else "cpu",
+                    kvcache=self.token_to_kv_pool,
+                )
         else:
             assert self.is_draft_worker
 
