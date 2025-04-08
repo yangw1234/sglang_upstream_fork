@@ -524,9 +524,6 @@ class Req:
 
 bid = 0
 
-from sglang.srt.utils import is_hpu
-IS_HPU = is_hpu()
-
 @dataclasses.dataclass
 class ScheduleBatch:
     """Store all information of a batch on the scheduler."""

@@ -99,7 +99,10 @@ class ForwardMode(IntEnum):
     def is_draft_extend(self):
         return self == ForwardMode.DRAFT_EXTEND
 
-    def is_cuda_graph(self):
+    def is_cuda_graph(self, device: str = "cuda"):
+        if device == "hpu":
+            # hpu will always use graph runner
+            return True
         return (
             self == ForwardMode.DECODE
             or self == ForwardMode.TARGET_VERIFY
