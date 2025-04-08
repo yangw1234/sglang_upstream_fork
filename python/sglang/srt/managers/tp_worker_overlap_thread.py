@@ -274,7 +274,6 @@ def create_hpu_specific_fields(ret: ModelWorkerBatch, model_runner):
             slots_list.append(slots)
         for i in range(padded_batch_size - batch_size):
             block_tables.append([_PAD_BLOCK_ID])
-        print(f"ret.out_cache_loc: {ret.out_cache_loc}")
 
         padding_len = padded_batch_size - len(ret.seq_lens)
         input_ids = torch.nn.functional.pad(ret.input_ids, (0, padding_len), value=0)
