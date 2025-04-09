@@ -29,6 +29,7 @@ from sglang.srt.utils import (
     get_device,
     get_device_memory_capacity,
     is_flashinfer_available,
+    is_hpu,
     is_hip,
     is_port_available,
     is_remote_url,
@@ -393,6 +394,12 @@ class ServerArgs:
         os.environ["SGLANG_DISABLE_OUTLINES_DISK_CACHE"] = (
             "1" if self.disable_outlines_disk_cache else "0"
         )
+
+        if is_hpu():
+            if self.max_running_requests is None:
+                self.max_running_requests = 128
+            
+            self.page_size = 128 # HPU only supports page size of 128 for now
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
