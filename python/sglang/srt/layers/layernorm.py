@@ -93,6 +93,26 @@ class RMSNorm(CustomOp):
         else:
             return x, residual
 
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ):
+        from vllm_hpu_extension.kernels import rms_norm
+
+        HPUFusedRMSNorm = rms_norm()
+        if HPUFusedRMSNorm is None:
+            return self.forward_native(x, residual)
+        # TODO: Figure out a reliable method for 3D shapes. Unsqueeze is a temporary hack
+        # Need to be 3D shape
+        orig_shape = x.shape
+        if residual is not None:
+            residual += x.view(residual.shape)
+            x = HPUFusedRMSNorm.apply(residual.unsqueeze(0), self.weight, self.variance_epsilon)
+            return x.view(orig_shape), residual
+        x = HPUFusedRMSNorm.apply(x.unsqueeze(0), self.weight, self.variance_epsilon)
+        return x.view(orig_shape)
+
 
 class GemmaRMSNorm(CustomOp):
     def __init__(
