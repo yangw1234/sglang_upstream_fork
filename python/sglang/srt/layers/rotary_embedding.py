@@ -227,6 +227,102 @@ class RotaryEmbedding(CustomOp):
         return s
 
 
+class Llama4VisionRotaryEmbedding(RotaryEmbedding):
+
+    def __init__(
+        self,
+        config,
+    ):
+        head_size = config.hidden_size // config.num_attention_heads
+        rotary_dim = config.hidden_size // config.num_attention_heads // 2
+        max_position_embeddings = (config.image_size // config.patch_size) ** 2
+        base = config.rope_theta
+        is_neox_style = False
+        dtype = torch.bfloat16
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                        is_neox_style, dtype)
+
+    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+        inv_freqs = super()._compute_inv_freq(base)
+        inv_freqs = inv_freqs[:(self.rotary_dim // 2)]
+        return inv_freqs
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        inv_freq = self._compute_inv_freq(self.base)
+
+        # Number of image patches (plus one extra row for CLS token, for example)
+        num_patches = self.max_position_embeddings
+        img_idx = torch.arange(num_patches,
+                    dtype=torch.int32) \
+                    .reshape(num_patches, 1)
+        img_idx = torch.cat([img_idx, img_idx[:1]], dim=0)
+        img_idx[-1, -1] = -2  # set to ID_CLS_TOKEN
+        num_patches_single_dim = int(math.sqrt(num_patches))
+        frequencies_x = img_idx % num_patches_single_dim
+        frequencies_y = img_idx // num_patches_single_dim
+
+        freqs_x = ((frequencies_x + 1)[..., None] *
+                inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
+        freqs_y = ((frequencies_y + 1)[..., None] *
+                inv_freq[None, None, :]).repeat_interleave(2, dim=-1)
+
+        # The slicing reduces the last dimension so
+        # that ultimately we have one angle per 2D pair.
+        freqs = torch.cat([freqs_x, freqs_y],
+                        dim=-1).float().contiguous()[..., ::2]
+        freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
+
+        # cache = torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1)
+
+        # Compute cosine and sine for each angle.
+        cos_vals = torch.cos(freqs)
+        sin_vals = torch.sin(freqs)
+
+        cache = torch.concat([cos_vals, sin_vals], dim=-1)
+        return cache
+
+    def forward(self, query: torch.Tensor, key: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Ensure the cache is on the right device.
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
+        cos_cache, sin_cache = self.cos_sin_cache.chunk(2, dim=-1)
+        # shape: [577, 1, 44]
+        #print(f"[DENBUG] cos_cache.shape: {cos_cache.shape}, sin_cache.shape: {sin_cache.shape}")
+
+        query_2d = query.float().reshape(*query.shape[:-1], -1, 2)
+        key_2d = key.float().reshape(*key.shape[:-1], -1, 2)
+        # e.g., [17, 577, 8, 44, 2]
+        #print(f'[DEBUG] query_2d.shape: {query_2d.shape}, key_2d.shape: {key_2d.shape}')
+
+        # Reshape cos_cache and sin_cache to broadcast properly.
+        # We want them to have shape [1, 577, 1, 44] to match the query dimensions (except for the last two dims).
+        cos_cache = cos_cache.view(1, cos_cache.shape[0], 1, cos_cache.shape[-1])
+        sin_cache = sin_cache.view(1, sin_cache.shape[0], 1, sin_cache.shape[-1])
+        # e.g., [1, 577, 1, 44]
+
+        # Separate the real and imaginary parts.
+        q_real, q_imag = query_2d.unbind(-1) # each: [17, 577, 8, 44]
+        k_real, k_imag = key_2d.unbind(-1) # each: [17, 577, 8, 44]
+
+        # Manually apply the complex multiplication (rotation) using the trigonometric identities.
+        # For a complex multiplication: (a+ib)*(c+id) = (ac - bd) + i(ad + bc)
+        q_rotated_real = q_real * cos_cache - q_imag * sin_cache
+        q_rotated_imag = q_real * sin_cache + q_imag * cos_cache
+
+        k_rotated_real = k_real * cos_cache - k_imag * sin_cache
+        k_rotated_imag = k_real * sin_cache + k_imag * cos_cache
+
+        # Re-stack the rotated components into a last dimension of size 2.
+        q_rotated = torch.stack([q_rotated_real, q_rotated_imag], dim=-1)  # shape: [17, 577, 8, 44, 2]
+        k_rotated = torch.stack([k_rotated_real, k_rotated_imag], dim=-1)  # shape: [17, 577, 8, 44, 2]
+
+        # Flatten the last two dimensions to match the original output shape.
+        # Flatten back to the desired shape (e.g., collapse the last two dimensions).
+        query_out = q_rotated.flatten(3)
+        key_out = k_rotated.flatten(3)
+
+        return query_out.type_as(query), key_out.type_as(key)
+
+
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with linear scaling.
 
@@ -796,67 +892,67 @@ class Llama3RotaryEmbedding(RotaryEmbedding):
         return new_freqs
 
 
-class Llama4VisionRotaryEmbedding(RotaryEmbedding):
+# class Llama4VisionRotaryEmbedding(RotaryEmbedding):
 
-    def __init__(
-        self,
-        head_size: int,
-        rotary_dim: int,
-        max_position_embeddings: int,
-        base: int,
-        is_neox_style: bool,
-        dtype: torch.dtype,
-    ):
-        super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
-        )
+#     def __init__(
+#         self,
+#         head_size: int,
+#         rotary_dim: int,
+#         max_position_embeddings: int,
+#         base: int,
+#         is_neox_style: bool,
+#         dtype: torch.dtype,
+#     ):
+#         super().__init__(
+#             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+#         )
 
-    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
-        inv_freqs = super()._compute_inv_freq(base)
-        inv_freqs = inv_freqs[: (self.rotary_dim // 2)]
-        return inv_freqs
+#     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+#         inv_freqs = super()._compute_inv_freq(base)
+#         inv_freqs = inv_freqs[: (self.rotary_dim // 2)]
+#         return inv_freqs
 
-    def _compute_cos_sin_cache(self) -> torch.Tensor:
-        inv_freq = self._compute_inv_freq(self.base)
+#     def _compute_cos_sin_cache(self) -> torch.Tensor:
+#         inv_freq = self._compute_inv_freq(self.base)
 
-        # self.max_position_embeddings here is number of image patches
-        # i.e. (image_size // patch_size) ** 2
-        num_patches = self.max_position_embeddings
-        img_idx = torch.arange(num_patches, dtype=torch.int32).reshape(num_patches, 1)
-        img_idx = torch.cat([img_idx, img_idx[:1]], dim=0)
-        img_idx[-1, -1] = -2  # set to ID_CLS_TOKEN
-        num_patches_single_dim = int(math.sqrt(num_patches))
-        frequencies_x = img_idx % num_patches_single_dim
-        frequencies_y = img_idx // num_patches_single_dim
-        freqs_x = (
-            (frequencies_x + 1)[..., None] * inv_freq[None, None, :]
-        ).repeat_interleave(2, dim=-1)
-        freqs_y = (
-            (frequencies_y + 1)[..., None] * inv_freq[None, None, :]
-        ).repeat_interleave(2, dim=-1)
-        freqs = torch.cat([freqs_x, freqs_y], dim=-1).float().contiguous()[..., ::2]
-        freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
-        cache = torch.view_as_complex(
-            torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1)
-        )
-        return cache
+#         # self.max_position_embeddings here is number of image patches
+#         # i.e. (image_size // patch_size) ** 2
+#         num_patches = self.max_position_embeddings
+#         img_idx = torch.arange(num_patches, dtype=torch.int32).reshape(num_patches, 1)
+#         img_idx = torch.cat([img_idx, img_idx[:1]], dim=0)
+#         img_idx[-1, -1] = -2  # set to ID_CLS_TOKEN
+#         num_patches_single_dim = int(math.sqrt(num_patches))
+#         frequencies_x = img_idx % num_patches_single_dim
+#         frequencies_y = img_idx // num_patches_single_dim
+#         freqs_x = (
+#             (frequencies_x + 1)[..., None] * inv_freq[None, None, :]
+#         ).repeat_interleave(2, dim=-1)
+#         freqs_y = (
+#             (frequencies_y + 1)[..., None] * inv_freq[None, None, :]
+#         ).repeat_interleave(2, dim=-1)
+#         freqs = torch.cat([freqs_x, freqs_y], dim=-1).float().contiguous()[..., ::2]
+#         freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
+#         cache = torch.view_as_complex(
+#             torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1)
+#         )
+#         return cache
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
-        query_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
-        key_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
-        broadcast_shape = [
-            d if i == 1 or i == (query_.ndim - 1) else 1
-            for i, d in enumerate(query_.shape)
-        ]
-        freqs_ci = self.cos_sin_cache.view(*broadcast_shape)
-        query_out = torch.view_as_real(query_ * freqs_ci).flatten(3)
-        key_out = torch.view_as_real(key_ * freqs_ci).flatten(3)
-        return query_out.type_as(query), key_out.type_as(key)
+#     def forward(
+#         self,
+#         query: torch.Tensor,
+#         key: torch.Tensor,
+#     ) -> Tuple[torch.Tensor, torch.Tensor]:
+#         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
+#         query_ = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+#         key_ = torch.view_as_complex(key.float().reshape(*key.shape[:-1], -1, 2))
+#         broadcast_shape = [
+#             d if i == 1 or i == (query_.ndim - 1) else 1
+#             for i, d in enumerate(query_.shape)
+#         ]
+#         freqs_ci = self.cos_sin_cache.view(*broadcast_shape)
+#         query_out = torch.view_as_real(query_ * freqs_ci).flatten(3)
+#         key_out = torch.view_as_real(key_ * freqs_ci).flatten(3)
+#         return query_out.type_as(query), key_out.type_as(key)
 
 
 class MRotaryEmbedding(RotaryEmbedding):
