@@ -34,7 +34,7 @@ jobs:
           cd vllm-fork
           git checkout v0.6.6.post1+Gaudi-1.20.0
           pip install --user -r requirements-hpu.txt
-          python setup.py develop
+          pip install --user .
           cd ..
           git clone https://github.com/merrymercy/human-eval.git
           cd human-eval
