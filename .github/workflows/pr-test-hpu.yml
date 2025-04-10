@@ -40,7 +40,7 @@ jobs:
           cd human-eval
           pip install --user -e .
           cd ..
-          pip install --user python[all_hpu]
+          pip install --user -e "python[all_hpu]"
 
 
       - name: Evaluate Accuracy
