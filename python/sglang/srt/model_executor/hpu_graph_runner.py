@@ -53,11 +53,29 @@ if _is_hpu:
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+_TYPE_CACHE = {}
+
 logger = logging.getLogger(__name__)
 
-HPUForwardBatch = namedtuple(
-    "HPUForwardBatch",
-    [
+def subtuple(obj: object,
+             typename: str,
+             to_copy: List[str],
+             to_override: Optional[Dict[str, object]] = None):
+    if obj is None:
+        return None
+    if to_override is None:
+        to_override = {}
+    fields = set(to_copy) | set(to_override.keys())
+    if type(obj) is dict:
+        values = {key: obj[key] for key in fields if key in obj}
+    else:
+        values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
+    if typename not in _TYPE_CACHE:
+        _TYPE_CACHE[typename] = collections.namedtuple(typename,
+                                                       ' '.join(fields))
+    return _TYPE_CACHE[typename](**values)
+
+hpu_fields = [
         "forward_mode",
         "batch_size",
         "input_ids",
@@ -81,9 +99,49 @@ HPUForwardBatch = namedtuple(
         "extend_return_logprob",
         "padded_static_len",
         "capture_hidden_mode",
+    ]
+
+HPUForwardBatchBase = namedtuple(
+    "HPUForwardBatch",
+    [
+        "forward_mode",
+        "batch_size",
+        "input_ids",
+        "out_cache_loc",
+        "positions",
+        "attn_bias",
+        "seq_pos",
+        "seq_idx",
+        "valid_seq_len",
+        "extend_seq_lens",
+        "page_size",
+        "block_list",
+        "block_mapping",
+        "block_groups",
+        "block_usage",
+        "block_scales",
+        "attn_backend",
+        "token_to_kv_pool",
+        "use_contiguous_pa",
+        "mm_inputs",
+        "input_embeds",
+        "extend_return_logprob",
+        "padded_static_len",
+        "capture_hidden_mode",
     ],
     defaults=[None, False, -1, CaptureHiddenMode.NULL],
 )
+
+from sglang.srt.managers.mm_utils import MultimodalInputs
+HPUMultimodalInputs = namedtuple("HPUMultimodalInputs", [field.name for field in MultimodalInputs.__dataclass_fields__.values()])
+
+class HPUForwardBatch(HPUForwardBatchBase):
+    
+    def contains_mm_inputs(self):
+        return self.mm_inputs is not None
+    
+    def merge_mm_inputs(self):
+        self.mm_inputs
 
 
 def flatten(in_list):
@@ -184,6 +242,14 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         block_groups = forward_batch.block_groups.to("hpu")
         block_usage = forward_batch.block_usage.to("hpu")
         block_scales = forward_batch.block_scales.to("hpu")
+    
+    if forward_batch.contains_mm_inputs():
+        if forward_batch.contains_audio_inputs():
+            raise NotImplementedError(f"Audio inputs are not supported yet")
+        
+        mm_inputs = forward_batch.merge_mm_inputs()
+        mm_inputs = HPUMultimodalInputs(**mm_inputs.__dict__)
+
 
     return HPUForwardBatch(
         forward_mode=forward_batch.forward_mode,
@@ -205,6 +271,7 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         attn_backend=forward_batch.attn_backend,
         token_to_kv_pool=forward_batch.token_to_kv_pool,
         use_contiguous_pa=forward_batch.use_contiguous_pa,
+        mm_inputs=mm_inputs,
     )
 
 
