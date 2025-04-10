@@ -33,13 +33,13 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import DynamicGradMode, get_compiler_backend
+from sglang.srt.utils import DynamicGradMode, get_compiler_backend, is_hpu
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
 
 
-@torch.compile(dynamic=True, backend=get_compiler_backend())
+@torch.compile(dynamic=True, backend=get_compiler_backend(), disable=is_hpu())
 def resolve_future_token_ids(input_ids, future_token_ids_map):
     input_ids[:] = torch.where(
         input_ids < 0,
@@ -62,7 +62,7 @@ class TpModelWorkerClient:
         # Load the model
         self.worker = TpModelWorker(server_args, gpu_id, tp_rank, dp_rank, nccl_port)
         self.max_running_requests = self.worker.max_running_requests
-        self.device = self.worker.device
+        self.device = self.worker.device if self.worker.device != "hpu" else "cpu"
         self.gpu_id = gpu_id
 
         # Init future mappings
@@ -75,7 +75,7 @@ class TpModelWorkerClient:
         # Launch threads
         self.input_queue = Queue()
         self.output_queue = Queue()
-        self.forward_stream = torch.get_device_module(self.device).Stream()
+        self.forward_stream = torch.get_device_module(self.worker.device).Stream()
         self.forward_thread = threading.Thread(
             target=self.forward_thread_func,
         )
