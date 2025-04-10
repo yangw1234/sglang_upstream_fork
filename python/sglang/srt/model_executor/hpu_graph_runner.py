@@ -21,7 +21,7 @@ import os
 import time
 from collections import namedtuple
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional, Dict
 
 import torch
 import tqdm
@@ -55,11 +55,29 @@ if _is_hpu:
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+_TYPE_CACHE = {}
+
 logger = logging.getLogger(__name__)
 
-HPUForwardBatch = namedtuple(
-    "HPUForwardBatch",
-    [
+def subtuple(obj: object,
+             typename: str,
+             to_copy: List[str],
+             to_override: Optional[Dict[str, object]] = None):
+    if obj is None:
+        return None
+    if to_override is None:
+        to_override = {}
+    fields = set(to_copy) | set(to_override.keys())
+    if type(obj) is dict:
+        values = {key: obj[key] for key in fields if key in obj}
+    else:
+        values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
+    if typename not in _TYPE_CACHE:
+        _TYPE_CACHE[typename] = namedtuple(typename,
+                                           ' '.join(fields))
+    return _TYPE_CACHE[typename](**values)
+
+hpu_fields = [
         "forward_mode",
         "batch_size",
         "input_ids",
@@ -82,9 +100,49 @@ HPUForwardBatch = namedtuple(
         "extend_return_logprob",
         "padded_static_len",
         "capture_hidden_mode",
+    ]
+
+HPUForwardBatchBase = namedtuple(
+    "HPUForwardBatch",
+    [
+        "forward_mode",
+        "batch_size",
+        "input_ids",
+        "out_cache_loc",
+        "positions",
+        "attn_bias",
+        "seq_pos",
+        "seq_idx",
+        "valid_seq_len",
+        "extend_seq_lens",
+        "page_size",
+        "block_list",
+        "block_mapping",
+        "block_groups",
+        "block_usage",
+        "block_scales",
+        "attn_backend",
+        "token_to_kv_pool",
+        "use_contiguous_pa",
+        "mm_inputs",
+        "input_embeds",
+        "extend_return_logprob",
+        "padded_static_len",
+        "capture_hidden_mode",
     ],
     defaults=[None, False, -1, CaptureHiddenMode.NULL],
 )
+
+from sglang.srt.managers.mm_utils import MultimodalInputs
+HPUMultimodalInputs = namedtuple("HPUMultimodalInputs", [field.name for field in MultimodalInputs.__dataclass_fields__.values()])
+
+class HPUForwardBatch(HPUForwardBatchBase):
+    
+    def contains_mm_inputs(self):
+        return self.mm_inputs is not None
+    
+    def merge_mm_inputs(self):
+        self.mm_inputs
 
 
 def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRunner):
@@ -139,11 +197,20 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         seq_pos = None
         seq_idx = None
         extend_seq_lens_padded = None
-        block_list = forward_batch.hpu_metadata.block_list.to("hpu")
-        block_mapping = forward_batch.hpu_metadata.block_mapping.to("hpu")
-        block_groups = forward_batch.hpu_metadata.block_groups.to("hpu")
-        block_usage = forward_batch.hpu_metadata.block_usage.to("hpu")
+
+        block_list = forward_batch.block_list.to("hpu")
+        block_mapping = forward_batch.block_mapping.to("hpu")
+        block_groups = forward_batch.block_groups.to("hpu")
+        block_usage = forward_batch.block_usage.to("hpu")
         use_contiguous_pa = forward_batch.hpu_metadata.use_contiguous_pa
+    
+    if forward_batch.contains_mm_inputs():
+        if forward_batch.contains_audio_inputs():
+            raise NotImplementedError(f"Audio inputs are not supported yet")
+        
+        mm_inputs = forward_batch.merge_mm_inputs()
+        mm_inputs = HPUMultimodalInputs(**mm_inputs.__dict__)
+
 
     return HPUForwardBatch(
         forward_mode=forward_batch.forward_mode,
@@ -164,6 +231,7 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         attn_backend=forward_batch.attn_backend,
         token_to_kv_pool=forward_batch.token_to_kv_pool,
         use_contiguous_pa=use_contiguous_pa,
+        mm_inputs=mm_inputs,
     )
 
 

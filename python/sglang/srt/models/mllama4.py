@@ -16,7 +16,14 @@ from sglang.srt.managers.mm_utils import (
 from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInputs
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import add_prefix
+from sglang.srt.utils import add_prefix, is_hpu
+from sglang.srt.layers.rotary_embedding import Llama4VisionRotaryEmbedding
+
+_is_hpu = is_hpu()
+if _is_hpu:
+    import transformers.models.llama4.modeling_llama4
+    # Monkey patch the Llama4VisionRotaryEmbedding class
+    transformers.models.llama4.modeling_llama4.Llama4VisionRotaryEmbedding = Llama4VisionRotaryEmbedding
 
 
 class Llama4ForConditionalGeneration(nn.Module):
@@ -216,6 +223,8 @@ class Llama4ForConditionalGeneration(nn.Module):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(
