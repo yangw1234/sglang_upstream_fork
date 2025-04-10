@@ -33,14 +33,14 @@ jobs:
           git clone https://github.com/HabanaAI/vllm-fork.git
           cd vllm-fork
           git checkout v0.6.6.post1+Gaudi-1.20.0
-          pip install -r requirements-hpu.txt
+          pip install --user -r requirements-hpu.txt
           python setup.py develop
           cd ..
           git clone https://github.com/merrymercy/human-eval.git
           cd human-eval
-          pip install -e .
+          pip install --user -e .
           cd ..
-          pip install python[all_hpu]
+          pip install --user python[all_hpu]
 
 
       - name: Evaluate Accuracy
@@ -48,6 +48,11 @@ jobs:
         run: |
           cd test/srt/
           SGLANG_IS_IN_CI=1 python test_eval_accuracy_large.py
+      
+      - name: Clean UP
+        run: |
+          pip uninstall vllm
+          pip uninstall sglang
 
   finish:
     if: always()
