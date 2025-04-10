@@ -48,14 +48,14 @@ from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.models.llama import LlamaForCausalLM, LlamaMLP
-from sglang.srt.utils import add_prefix, fast_topk, get_compiler_backend, make_layers
+from sglang.srt.utils import add_prefix, fast_topk, get_compiler_backend, is_hpu, make_layers
 
 logger = logging.getLogger(__name__)
 
 
 class Llama4MoE(nn.Module):
 
-    @torch.compile(dynamic=True, backend=get_compiler_backend())
+    @torch.compile(dynamic=True, backend=get_compiler_backend(), disable=is_hpu())
     @staticmethod
     def custom_routing_function(
         hidden_states: torch.Tensor,
