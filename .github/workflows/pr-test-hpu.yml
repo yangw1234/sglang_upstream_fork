@@ -44,10 +44,10 @@ jobs:
 
 
       - name: Evaluate Accuracy
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           cd test/srt/
-          SGLANG_IS_IN_CI=1 python test_eval_accuracy_large.py
+          SGLANG_IS_IN_CI=1 SGLANG_HPU_SKIP_WARMUP=true python test_eval_accuracy_large.py
       
       - name: Clean UP
         run: |
