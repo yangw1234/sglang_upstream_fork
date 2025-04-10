@@ -21,8 +21,7 @@ concurrency:
 
 jobs:
   accuracy-test-hpu:
-    if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') &&
-      github.event.pull_request.draft == false
+    if: (github.repository == 'yangw1234/sglang_upstream_fork') && github.event.pull_request.draft == false
     runs-on: hpu
     steps:
       - name: Checkout code
@@ -48,11 +47,6 @@ jobs:
         run: |
           cd test/srt/
           SGLANG_IS_IN_CI=1 SGLANG_HPU_SKIP_WARMUP=true python test_eval_accuracy_large.py
-      
-      - name: Clean UP
-        run: |
-          pip uninstall vllm
-          pip uninstall sglang
 
   finish:
     if: always()
