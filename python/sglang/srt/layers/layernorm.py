@@ -19,9 +19,10 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from sglang.srt.utils import is_cuda_available
+from sglang.srt.utils import is_cuda_available, is_hpu
 
 _is_cuda = is_cuda_available()
+_is_hpu = is_hpu()
 
 if _is_cuda:
     from sgl_kernel import (
@@ -76,6 +77,26 @@ class RMSNorm(CustomOp):
             return x
         else:
             return x, residual
+
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ):
+        from vllm_hpu_extension.kernels import rms_norm
+
+        HPUFusedRMSNorm = rms_norm()
+        if HPUFusedRMSNorm is None:
+            return self.forward_native(x, residual)
+        # TODO: Figure out a reliable method for 3D shapes. Unsqueeze is a temporary hack
+        # Need to be 3D shape
+        orig_shape = x.shape
+        if residual is not None:
+            residual += x.view(residual.shape)
+            x = HPUFusedRMSNorm.apply(residual.unsqueeze(0), self.weight, self.variance_epsilon)
+            return x.view(orig_shape), residual
+        x = HPUFusedRMSNorm.apply(x.unsqueeze(0), self.weight, self.variance_epsilon)
+        return x.view(orig_shape)
 
 
 class GemmaRMSNorm(CustomOp):
@@ -139,7 +160,7 @@ class Gemma3RMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.eps}"
 
 
-if not _is_cuda:
+if not _is_cuda and not _is_hpu:
     logger.info(
         "sgl-kernel is not available on Non-NV platforms. Fallback to other kernel libraries."
     )
