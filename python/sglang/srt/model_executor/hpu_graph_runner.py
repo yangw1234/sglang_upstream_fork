@@ -120,7 +120,6 @@ HPUForwardBatchBase = namedtuple(
         "block_mapping",
         "block_groups",
         "block_usage",
-        "block_scales",
         "attn_backend",
         "token_to_kv_pool",
         "use_contiguous_pa",
@@ -198,10 +197,10 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         seq_idx = None
         extend_seq_lens_padded = None
 
-        block_list = forward_batch.block_list.to("hpu")
-        block_mapping = forward_batch.block_mapping.to("hpu")
-        block_groups = forward_batch.block_groups.to("hpu")
-        block_usage = forward_batch.block_usage.to("hpu")
+        block_list = forward_batch.hpu_metadata.block_list.to("hpu")
+        block_mapping = forward_batch.hpu_metadata.block_mapping.to("hpu")
+        block_groups = forward_batch.hpu_metadata.block_groups.to("hpu")
+        block_usage = forward_batch.hpu_metadata.block_usage.to("hpu")
         use_contiguous_pa = forward_batch.hpu_metadata.use_contiguous_pa
     
     if forward_batch.contains_mm_inputs():
@@ -210,6 +209,8 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         
         mm_inputs = forward_batch.merge_mm_inputs()
         mm_inputs = HPUMultimodalInputs(**mm_inputs.__dict__)
+    else:
+        mm_inputs = None
 
 
     return HPUForwardBatch(
