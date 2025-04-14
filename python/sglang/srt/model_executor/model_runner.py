@@ -710,6 +710,7 @@ class ModelRunner:
         max_num_reqs: Optional[int] = None,
         max_total_tokens: Optional[int] = None,
     ):
+        logger.info(f"init_memory_pool: {self.server_args.kv_cache_dtype}")
         if self.server_args.kv_cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
@@ -726,7 +727,7 @@ class ModelRunner:
             )
 
         self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
-
+        logger.info(f"done profile_max_num_token")
         if max_num_reqs is None:
             max_num_reqs = min(
                 max(
@@ -783,7 +784,8 @@ class ModelRunner:
             raise RuntimeError(
                 "Not enough memory. Please try to increase --mem-fraction-static."
             )
-
+        
+        logger.info(f"init req_to_token_pool")
         if self.req_to_token_pool is None:
             self.req_to_token_pool = ReqToTokenPool(
                 size=max_num_reqs + 1,
@@ -795,6 +797,7 @@ class ModelRunner:
             # Draft worker shares req_to_token_pool with the target worker.
             assert self.is_draft_worker
 
+        logger.info(f"init token_to_kv_pool")
         if self.use_mla_backend:
             self.token_to_kv_pool = MLATokenToKVPool(
                 self.max_total_num_tokens,
@@ -829,7 +832,7 @@ class ModelRunner:
                 device=self.device,
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
-
+        logger.info(f"init token_to_kv_pool_allocator")
         if self.token_to_kv_pool_allocator is None:
             if self.page_size == 1:
                 self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(

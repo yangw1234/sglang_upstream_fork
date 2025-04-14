@@ -128,11 +128,11 @@ class MoeWNA16Config(QuantizationConfig):
         num_bits = quant_config.get("bits")
         desc_act = quant_config.get("desc_act")
 
-        capability_tuple = get_device_capability()
+        major, minor = get_device_capability()
         device_capability = (
             -1
-            if capability_tuple is None
-            else capability_tuple[0] * 10 + capability_tuple[1]
+            if major is None or minor is None
+            else major * 10 + minor
         )
         # Avoid circular import
         awq_min_capability = AWQConfig.get_min_capability()

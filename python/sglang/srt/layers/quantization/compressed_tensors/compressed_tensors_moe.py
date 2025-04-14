@@ -7,6 +7,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 import torch
+import torch.nn.functional as F
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import QuantizationStrategy
 
@@ -25,9 +26,11 @@ from sglang.srt.layers.quantization.utils import (
     per_tensor_dequantize,
     replace_parameter,
 )
-from sglang.srt.utils import set_weight_attrs
-
+from sglang.srt.utils import set_weight_attrs, is_hpu
+from sglang.srt.custom_op import CustomOp
+FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 _is_cuda = is_cuda()
+_is_hpu = is_hpu()
 
 if _is_cuda:
     from sglang.srt.custom_op import scaled_fp8_quant as sgl_scaled_fp8_quant
@@ -40,6 +43,14 @@ try:
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
+
+if _is_hpu:
+    import habana_frameworks.torch.utils.experimental as htexp
+    if htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:
+        FP8_MAX = torch.finfo(torch.float8_e4m3fnuz).max
+    import habana_frameworks.torch as htorch
+    from vllm_hpu_extension.ops import scaled_fp8_quant
+    vllm_ops.scaled_fp8_quant = scaled_fp8_quant
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +238,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 layer.w2_input_scale.max(), requires_grad=False
             )
 
-        if is_fp8_fnuz():
+        if not _is_hpu and is_fp8_fnuz():
             # Normalize the weights and scales
             w13_weight, w13_weight_scale, w13_input_scale = (
                 normalize_e4m3fn_to_e4m3fnuz(
@@ -255,6 +266,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     w2_input_scale, requires_grad=False
                 )
         if self.weight_quant.strategy == QuantizationStrategy.TENSOR:
+            print("***************************** got here ******************")
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
             assert layer.w13_weight_scale is not None
@@ -285,8 +297,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(
                 max_w13_scales, requires_grad=False
             )
+    
+    def apply(self, *args, **kwargs):
+        if _is_hpu:
+            return self.forward_hpu(*args, **kwargs)
+        else:
+            return self.forward_cuda(*args, **kwargs)
 
-    def apply(
+    def forward_cuda(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
@@ -339,6 +357,189 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
+    def forward_hpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
+        inplace: bool = True,
+        no_combine: bool = False,
+        apply_router_weight_on_input: bool = False,
+    ) -> torch.Tensor:
+        from sglang.srt.layers.moe.fused_moe_triton import fused_experts
+        from sglang.srt.layers.moe.topk import select_experts
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            correction_bias=correction_bias,
+        )
+        moe_n_slice = 4
+        seq_len, hidden_dim = x.shape
+        num_experts = layer.local_num_experts
+        n_expert_slice = num_experts // moe_n_slice
+        # num_experts = layer.w13_weight.shape[0]
+        # n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
+        assert n_expert_slice * moe_n_slice == num_experts
+        x = x.view(-1, hidden_dim)
+        total_num_experts = router_logits.size(-1)
+
+        actual_total_experts = total_num_experts
+        actual_num_experts = num_experts
+        n_expert_slice = actual_num_experts // moe_n_slice
+        ep_rank = 0
+        ep_shift = ep_rank * num_experts
+        topk_weights = topk_weights.view(-1, top_k)
+        topk_ids = topk_ids.view(-1, top_k)
+
+        def naive_dequant_moe(x, topk_ids, topk_weights, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale):
+
+            w13_weight = w13_weight.to(torch.bfloat16) * w13_weight_scale.to(torch.bfloat16)
+            w2_weight = w2_weight.to(torch.bfloat16) * w2_weight_scale.to(torch.bfloat16)
+
+            ep_rank = 0
+            assert ep_rank is not None
+            ep_shift = ep_rank * num_experts
+            for i in range(moe_n_slice):
+                min_expert = i * n_expert_slice
+                max_expert = (i + 1) * n_expert_slice
+                w13_list_slice = [
+                    w13_weight[j]
+                    for j in range(min_expert, max_expert)
+                ]
+                w2_list_slice = [
+                    w2_weight[j]
+                    for j in range(min_expert, max_expert)
+                ]
+                current_hidden_states = torch.ops.hpu.mixture_of_experts(
+                    hidden_states=x,
+                    expert_routing_table=topk_ids.to(torch.int64),
+                    router_weights=topk_weights.to(x.dtype),
+                    w12=w13_list_slice,
+                    w3=w2_list_slice,
+                    permuted_weights=True,
+                    activation=activation,
+                    experts_min=min_expert + ep_shift,
+                    experts_max=max_expert - 1 + ep_shift,)
+                htorch.core.mark_step()
+                torch.hpu.synchronize()
+                if i == 0:
+                    final_hidden_states = current_hidden_states
+                else:
+                    final_hidden_states.add_(current_hidden_states)
+            return final_hidden_states.view(-1, x.shape[1])   
+
+
+
+        def dynamic_quant(data, single_scale = False):
+            if single_scale:
+                scale = ((torch.abs(data)).max() + 1e-8) / FP8_MAX
+            else:
+                scale = ((torch.abs(data)).max(dim=-1).values + 1e-8) / FP8_MAX
+                scale = scale.unsqueeze(-1)
+            data_fp8 = torch.ops.hpu.cast_to_fp8_v2(data, 1.0 / scale, False, False, torch.float8_e4m3fn)[0]
+            return data_fp8, scale.float()
+
+        def do_static_moe_with_dynamic_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, total_num_experts, num_experts, w13_weight_scale_inv_fp8=None, w2_weight_scale_inv_fp8=None):
+            router_indices = topk_ids.reshape(-1, 1).expand(-1, hidden_dim)
+            print(f"router_indices: {router_indices.size()} {router_indices.dtype} {router_indices.device}")
+            routed_in = torch.gather(
+                input=x,
+                dim=0,
+                index=router_indices,
+            )
+            print(f"routed_in: {routed_in.size()} {routed_in.dtype} {routed_in.device}")
+            routed_in = routed_in * topk_weights.reshape(-1, 1)
+            print(f"routed_in: {routed_in.size()} {routed_in.dtype} {routed_in.device}")
+            routed_in = routed_in.view(num_experts, -1, hidden_dim)
+            print(f"routed_in: {routed_in.size()} {routed_in.dtype} {routed_in.device}")
+            x_fp8, x_scale = dynamic_quant(routed_in)
+            print(f"x_fp8: {x_fp8.size()} {x_fp8.dtype} {x_fp8.device}")
+            print(f"x_scale: {x_scale.size()} {x_scale.dtype} {x_scale.device}")
+
+            gate_up = torch.ops.hpu.fp8_gemm_v2(
+                    A=x_fp8,
+                    trans_A=False,
+                    B=w13_weight_fp8,
+                    trans_B=True,
+                    D=None,
+                    out_dtype=torch.bfloat16,
+                    A_scale_inv=x_scale,
+                    B_scale_inv=w13_weight_scale_inv_fp8.transpose(1, 2),
+                    bias=None,
+                    accumulate=False)
+            gate, up = gate_up.chunk(2, dim=-1)
+            gate_up = F.silu(up) * gate
+            gate_up, gate_up_scale = dynamic_quant(gate_up)
+            current_hidden_states = torch.ops.hpu.fp8_gemm_v2(
+                gate_up,
+                False,
+                w2_weight_fp8,
+                True,
+                None,
+                torch.bfloat16,
+                gate_up_scale,
+                w2_weight_scale_inv_fp8.transpose(1, 2),
+                None,
+                False,
+            )
+            base = torch.zeros_like(x)
+            result = base.scatter_add(dim=0, index=router_indices, src=current_hidden_states.view(-1, hidden_dim))
+            # print(f"result: {result.size()} {result.dtype} {result.device}")
+            return result
+
+        # print("Tensors passed to fused_experts:")
+        # print(f"  x: {x.size()} {x.dtype} {x.device}")
+        # print(f"  layer.w13_weight: {layer.w13_weight.size()} {layer.w13_weight.dtype} {layer.w13_weight.device}")
+        # print(f"  layer.w2_weight: {layer.w2_weight.size()} {layer.w2_weight.dtype} {layer.w2_weight.device}")
+        # print(f"  topk_weights: {topk_weights.size()} {topk_weights.dtype} {topk_weights.device}")
+        # print(f"  topk_ids: {topk_ids.size()} {topk_ids.dtype} {topk_ids.device}")
+        # print(f"  inplace: {inplace}")
+        # print(f"  activation: {activation}")
+        # print(f"  use_fp8_w8a8: {True}")
+        # print(f"  per_channel_quant: {self.weight_quant.strategy == QuantizationStrategy.CHANNEL}")
+        # print(f"  w1_scale: {layer.w13_weight_scale.size()} {layer.w13_weight_scale.dtype} {layer.w13_weight_scale.device}")
+        # print(f"  w2_scale: {layer.w2_weight_scale.size()} {layer.w2_weight_scale.dtype} {layer.w2_weight_scale.device}")
+        # print(f"  a1_scale: {layer.w13_input_scale.size() if layer.w13_input_scale is not None else 'None'} {layer.w13_input_scale.dtype if layer.w13_input_scale is not None else 'None'} {layer.w13_input_scale.device if layer.w13_input_scale is not None else 'None'}")
+        # print(f"  a2_scale: {layer.w2_input_scale.size() if layer.w2_input_scale is not None else 'None'} {layer.w2_input_scale.dtype if layer.w2_input_scale is not None else 'None'} {layer.w2_input_scale.device if layer.w2_input_scale is not None else 'None'}")
+        # print(f"  apply_router_weight_on_input: {apply_router_weight_on_input}")
+
+
+        # result = do_static_moe_with_dynamic_scaling(x,
+        #                                            topk_ids,
+        #                                            topk_weights,
+        #                                            layer.w13_weight,
+        #                                            layer.w2_weight,
+        #                                            moe_n_slice,
+        #                                            n_expert_slice,
+        #                                            layer.w13_weight_scale,
+        #                                            layer.w2_weight_scale)
+        result = naive_dequant_moe(x,
+                                   topk_ids,
+                                   topk_weights,
+                                   layer.w13_weight,
+                                   layer.w2_weight,
+                                   layer.w13_weight_scale,
+                                   layer.w2_weight_scale)
+        htorch.core.mark_step()
+        return result
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 

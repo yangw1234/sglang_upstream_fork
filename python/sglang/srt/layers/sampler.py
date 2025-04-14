@@ -76,7 +76,7 @@ class Sampler(nn.Module):
                 logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
         else:
             # Post process logits
-            logits.div_(sampling_info.temperatures)
+            logits.div_(sampling_info.temperatures.to(logits.device))
             logits[:] = torch.softmax(logits, dim=-1)
             probs = logits
             del logits
@@ -89,7 +89,7 @@ class Sampler(nn.Module):
 
                     # clamp to avoid -inf
                     logprobs = torch.log(
-                        top_p_normalize_probs_torch(probs, sampling_info.top_ps)
+                        top_p_normalize_probs_torch(probs, sampling_info.top_ps.to(probs.device))
                     ).clamp(min=torch.finfo(probs.dtype).min)
 
                 max_top_k_round, batch_size = 32, probs.shape[0]
@@ -97,17 +97,17 @@ class Sampler(nn.Module):
                     (max_top_k_round, batch_size), device=probs.device
                 )
                 if sampling_info.need_min_p_sampling:
-                    probs = top_k_renorm_prob(probs, sampling_info.top_ks)
-                    probs = top_p_renorm_prob(probs, sampling_info.top_ps)
+                    probs = top_k_renorm_prob(probs, sampling_info.top_ks.to(probs.device))
+                    probs = top_p_renorm_prob(probs, sampling_info.top_ps.to(probs.device))
                     batch_next_token_ids = min_p_sampling_from_probs(
-                        probs, uniform_samples, sampling_info.min_ps
+                        probs, uniform_samples, sampling_info.min_ps.to(probs.device)
                     )
                 else:
                     batch_next_token_ids, success = top_k_top_p_sampling_from_probs(
                         probs,
                         uniform_samples,
-                        sampling_info.top_ks,
-                        sampling_info.top_ps,
+                        sampling_info.top_ks.to(probs.device),
+                        sampling_info.top_ps.to(probs.device),
                         filter_apply_order="joint",
                     )
 
@@ -119,16 +119,16 @@ class Sampler(nn.Module):
                 # A slower fallback implementation with torch native operations.
                 batch_next_token_ids = top_k_top_p_min_p_sampling_from_probs_torch(
                     probs,
-                    sampling_info.top_ks,
-                    sampling_info.top_ps,
-                    sampling_info.min_ps,
+                    sampling_info.top_ks.to(probs.device),
+                    sampling_info.top_ps.to(probs.device),
+                    sampling_info.min_ps.to(probs.device),
                     sampling_info.need_min_p_sampling,
                 )
 
                 if return_logprob:
                     # clamp to avoid -inf
                     logprobs = torch.log(
-                        top_p_normalize_probs_torch(probs, sampling_info.top_ps)
+                        top_p_normalize_probs_torch(probs, sampling_info.top_ps.to(probs.device))
                     ).clamp(min=torch.finfo(probs.dtype).min)
             else:
                 raise ValueError(

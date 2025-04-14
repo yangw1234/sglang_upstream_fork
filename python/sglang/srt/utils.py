@@ -307,8 +307,9 @@ def get_available_gpu_memory(device, gpu_id, distributed=False, empty_cache=True
                 f"WARNING: current device is not {gpu_id}, but {torch.hpu.current_device()}, ",
                 "which may cause useless memory allocation for torch HPU context.",
             )
-
+        logger.info(f"getting hpu memory info")
         free_gpu_memory, total_gpu_memory = torch.hpu.mem_get_info()
+        logger.info(f"hpu memory info got")
 
     elif device == "cpu":
         # TODO: rename the variables in the current function to be not GPU specific
@@ -1321,7 +1322,7 @@ def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
             # TODO(HandH1998): `get_device_capability` is not supported by `torch.hpu` for now.
             # Update this once the support is available.
             # major, minor = torch.hpu.get_device_capability(device_id)
-            major, minor = None, None
+            return None, None
         except Exception as e:
             raise RuntimeError(
                 f"An error occurred while getting device capability of hpu: {e}."
