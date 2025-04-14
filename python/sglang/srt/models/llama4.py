@@ -261,8 +261,11 @@ class Llama4Attention(nn.Module):
         if self.rotary_emb is not None:
             q_view, k_view = qk.split([self.q_size, self.kv_size], dim=-1)
             q_out_unused, k_out_unused = self.rotary_emb(positions, q_view, k_view)
-            # assert (q_out_unused is q_view) and (k_out_unused is k_view)
-            del q_view, k_view, q_out_unused, k_out_unused
+            if (q_out_unused is q_view) and (k_out_unused is k_view):
+                del q_view, k_view, q_out_unused, k_out_unused
+                qk = qk
+            else:
+                qk = torch.cat([q_out_unused, k_out_unused], dim=-1)
 
         if self.qk_norm is not None:
             # TODO there are still 2 redundant direct_copy_kernel_cuda for this `reshape` and (in attn backend) q.contiguous(), maybe we can fuse them later
