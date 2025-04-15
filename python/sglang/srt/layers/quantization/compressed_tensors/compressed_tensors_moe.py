@@ -379,6 +379,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
+        import habana_frameworks.torch as htorch
+        hidden_dim = x.shape[-1]
+        num_experts = layer.w13_weight.shape[0]
+        moe_n_slice = 8 if num_experts > 32 else 1
+        n_expert_slice = num_experts // moe_n_slice
+        assert n_expert_slice * moe_n_slice == num_experts
+        x = x.view(-1, hidden_dim)
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -391,32 +398,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             correction_bias=correction_bias,
         )
-        moe_n_slice = 4
-        seq_len, hidden_dim = x.shape
-        num_experts = layer.local_num_experts
-        n_expert_slice = num_experts // moe_n_slice
-        # num_experts = layer.w13_weight.shape[0]
-        # n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
-        assert n_expert_slice * moe_n_slice == num_experts
-        x = x.view(-1, hidden_dim)
-        total_num_experts = router_logits.size(-1)
-
-        actual_total_experts = total_num_experts
-        actual_num_experts = num_experts
-        n_expert_slice = actual_num_experts // moe_n_slice
-        ep_rank = 0
-        ep_shift = ep_rank * num_experts
         topk_weights = topk_weights.view(-1, top_k)
         topk_ids = topk_ids.view(-1, top_k)
+        ep_rank = 0
+        assert ep_rank is not None
+        ep_shift = ep_rank * num_experts
 
         def naive_dequant_moe(x, topk_ids, topk_weights, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale):
 
             w13_weight = w13_weight.to(torch.bfloat16) * w13_weight_scale.to(torch.bfloat16)
             w2_weight = w2_weight.to(torch.bfloat16) * w2_weight_scale.to(torch.bfloat16)
 
-            ep_rank = 0
-            assert ep_rank is not None
-            ep_shift = ep_rank * num_experts
             for i in range(moe_n_slice):
                 min_expert = i * n_expert_slice
                 max_expert = (i + 1) * n_expert_slice
