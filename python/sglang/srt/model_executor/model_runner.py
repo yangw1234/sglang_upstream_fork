@@ -73,6 +73,7 @@ from sglang.srt.utils import (
     MultiprocessingSerializer,
     enable_show_time_cost,
     get_available_gpu_memory,
+    get_compiler_backend,
     init_custom_process_group,
     is_cuda,
     is_hip,
@@ -393,6 +394,10 @@ class ModelRunner:
                 load_config=self.load_config,
                 device_config=DeviceConfig(self.device),
             )
+
+        if self.server_args.enable_torch_compile:
+            self.model = torch.compile(self.model, backend=get_compiler_backend())
+
         monkey_patch_vllm_parallel_state(reverse=True)
         monkey_patch_isinstance_for_vllm_base_layer(reverse=True)
 
