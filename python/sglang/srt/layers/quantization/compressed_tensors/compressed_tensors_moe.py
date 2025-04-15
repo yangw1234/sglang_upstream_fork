@@ -382,10 +382,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         import habana_frameworks.torch as htorch
         hidden_dim = x.shape[-1]
         num_experts = layer.w13_weight.shape[0]
-        moe_n_slice = 8 if num_experts > 32 else 1
+        moe_n_slice = 4 if num_experts > 32 else 1
         n_expert_slice = num_experts // moe_n_slice
         assert n_expert_slice * moe_n_slice == num_experts
         x = x.view(-1, hidden_dim)
+        seq_len = x.shape[0]
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -431,7 +432,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     experts_min=min_expert + ep_shift,
                     experts_max=max_expert - 1 + ep_shift,)
                 htorch.core.mark_step()
-                torch.hpu.synchronize()
                 if i == 0:
                     final_hidden_states = current_hidden_states
                 else:
@@ -449,72 +449,125 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             data_fp8 = torch.ops.hpu.cast_to_fp8_v2(data, 1.0 / scale, False, False, torch.float8_e4m3fn)[0]
             return data_fp8, scale.float()
 
-        def do_static_moe_with_dynamic_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, total_num_experts, num_experts, w13_weight_scale_inv_fp8=None, w2_weight_scale_inv_fp8=None):
-            router_indices = topk_ids.reshape(-1, 1).expand(-1, hidden_dim)
-            print(f"router_indices: {router_indices.size()} {router_indices.dtype} {router_indices.device}")
-            routed_in = torch.gather(
-                input=x,
-                dim=0,
-                index=router_indices,
-            )
-            print(f"routed_in: {routed_in.size()} {routed_in.dtype} {routed_in.device}")
-            routed_in = routed_in * topk_weights.reshape(-1, 1)
-            print(f"routed_in: {routed_in.size()} {routed_in.dtype} {routed_in.device}")
-            routed_in = routed_in.view(num_experts, -1, hidden_dim)
-            print(f"routed_in: {routed_in.size()} {routed_in.dtype} {routed_in.device}")
-            x_fp8, x_scale = dynamic_quant(routed_in)
-            print(f"x_fp8: {x_fp8.size()} {x_fp8.dtype} {x_fp8.device}")
-            print(f"x_scale: {x_scale.size()} {x_scale.dtype} {x_scale.device}")
+        def do_dynamic_moe_with_dynamic_scaling(x,
+                                                topk_ids,
+                                                topk_weights,
+                                                w13_weight_fp8,
+                                                w2_weight_fp8,
+                                                moe_n_slice,
+                                                n_expert_slice,
+                                                w13_weight_scale_inv_fp8=None,
+                                                w2_weight_scale_inv_fp8=None):
+            x_fp8, x_scale = dynamic_quant(x, single_scale=True)
+            for i in range(moe_n_slice):
+                min_expert = i * n_expert_slice
+                max_expert = (i + 1) * n_expert_slice
 
-            gate_up = torch.ops.hpu.fp8_gemm_v2(
-                    A=x_fp8,
+                w13_list_slice = [w13_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
+                w2_list_slice = [w2_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
+                w13_weight_scale = [w13_weight_scale_inv_fp8[j, ...] for j in range(min_expert, max_expert)]
+                w2_weight_scale = [w2_weight_scale_inv_fp8[j,...] for j in range(min_expert, max_expert)]
+
+                current_hidden_states = torch.ops.hpu.mixture_of_experts(
+                                            hidden_states=x_fp8,
+                                            expert_routing_table=topk_ids.to(torch.int64),
+                                            router_weights=topk_weights.to(x.dtype),
+                                            w12=w13_list_slice,
+                                            w3=w2_list_slice,
+                                            d_scale_hidden_states=x_scale,
+                                            d_scale_w12=w13_weight_scale,
+                                            d_scale_w3=w2_weight_scale,
+                                            permuted_weights=True,
+                                            activation="silu",
+                                            experts_min=min_expert + ep_shift,
+                                            experts_max=max_expert - 1 + ep_shift)
+                htorch.core.mark_step()
+                if i == 0:
+                    final_hidden_states = current_hidden_states
+                else:
+                    final_hidden_states.add_(current_hidden_states)
+            return final_hidden_states
+
+        def do_static_moe_with_dynamic_scaling(x,
+                                               topk_ids,
+                                               topk_weights,
+                                               w13_weight_fp8,
+                                               w2_weight_fp8,
+                                               total_num_experts,
+                                               num_experts,
+                                               w13_weight_scale_inv_fp8=None,
+                                               w2_weight_scale_inv_fp8=None):
+            x_fp8, x_scale = dynamic_quant(x)
+            # padded_weights shape is (total_num_experts, num_tokens)
+            experts_mask = torch.zeros((x.size(0), total_num_experts), dtype=x.dtype, device=x.device)
+            experts_mask.scatter_(-1, topk_ids, topk_weights)
+            experts_mask = experts_mask.transpose(0, 1)
+
+            if seq_len > 1:
+                mask_weights = torch.zeros((x_fp8.size(0), total_num_experts), dtype=x.dtype, device=x.device)
+                mask_weights.scatter_(-1, topk_ids, 1)
+                mask_weights = mask_weights.transpose(0, 1)
+            
+            # print(f"mask_weights: {mask_weights.shape}, x_fp8: {x_fp8.shape}, x_scale: {x_scale.shape}")
+
+            for i in range(num_experts):
+                w13_weight_fp8_slice = w13_weight_fp8[i, ...]
+                w2_weight_fp8_slice = w2_weight_fp8[i, ...]
+                w13_scale_fp8_slice = w13_weight_scale_inv_fp8[i, ...]
+                w2_scale_fp8_slice = w2_weight_scale_inv_fp8[i, ...]
+
+                if seq_len > 1:
+                    mask_weight = mask_weights[i + ep_shift].unsqueeze(1)
+                    current_state_static = x_fp8 * mask_weight.to(torch.float8_e4m3fn)
+                else:
+                    current_state_static = x_fp8
+
+                up_gate_states = torch.ops.hpu.fp8_gemm_v2(
+                    A=current_state_static,
                     trans_A=False,
-                    B=w13_weight_fp8,
+                    B=w13_weight_fp8_slice,
                     trans_B=True,
                     D=None,
                     out_dtype=torch.bfloat16,
                     A_scale_inv=x_scale,
-                    B_scale_inv=w13_weight_scale_inv_fp8.transpose(1, 2),
+                    B_scale_inv=w13_scale_fp8_slice.transpose(0, 1),
                     bias=None,
                     accumulate=False)
-            gate, up = gate_up.chunk(2, dim=-1)
-            gate_up = F.silu(up) * gate
-            gate_up, gate_up_scale = dynamic_quant(gate_up)
-            current_hidden_states = torch.ops.hpu.fp8_gemm_v2(
-                gate_up,
-                False,
-                w2_weight_fp8,
-                True,
-                None,
-                torch.bfloat16,
-                gate_up_scale,
-                w2_weight_scale_inv_fp8.transpose(1, 2),
-                None,
-                False,
-            )
-            base = torch.zeros_like(x)
-            result = base.scatter_add(dim=0, index=router_indices, src=current_hidden_states.view(-1, hidden_dim))
-            # print(f"result: {result.size()} {result.dtype} {result.device}")
-            return result
 
-        # print("Tensors passed to fused_experts:")
-        # print(f"  x: {x.size()} {x.dtype} {x.device}")
-        # print(f"  layer.w13_weight: {layer.w13_weight.size()} {layer.w13_weight.dtype} {layer.w13_weight.device}")
-        # print(f"  layer.w2_weight: {layer.w2_weight.size()} {layer.w2_weight.dtype} {layer.w2_weight.device}")
-        # print(f"  topk_weights: {topk_weights.size()} {topk_weights.dtype} {topk_weights.device}")
-        # print(f"  topk_ids: {topk_ids.size()} {topk_ids.dtype} {topk_ids.device}")
-        # print(f"  inplace: {inplace}")
-        # print(f"  activation: {activation}")
-        # print(f"  use_fp8_w8a8: {True}")
-        # print(f"  per_channel_quant: {self.weight_quant.strategy == QuantizationStrategy.CHANNEL}")
-        # print(f"  w1_scale: {layer.w13_weight_scale.size()} {layer.w13_weight_scale.dtype} {layer.w13_weight_scale.device}")
-        # print(f"  w2_scale: {layer.w2_weight_scale.size()} {layer.w2_weight_scale.dtype} {layer.w2_weight_scale.device}")
-        # print(f"  a1_scale: {layer.w13_input_scale.size() if layer.w13_input_scale is not None else 'None'} {layer.w13_input_scale.dtype if layer.w13_input_scale is not None else 'None'} {layer.w13_input_scale.device if layer.w13_input_scale is not None else 'None'}")
-        # print(f"  a2_scale: {layer.w2_input_scale.size() if layer.w2_input_scale is not None else 'None'} {layer.w2_input_scale.dtype if layer.w2_input_scale is not None else 'None'} {layer.w2_input_scale.device if layer.w2_input_scale is not None else 'None'}")
-        # print(f"  apply_router_weight_on_input: {apply_router_weight_on_input}")
+                d = up_gate_states.shape[-1] // 2
+                current_state_static = F.silu(up_gate_states[..., :d]) * up_gate_states[..., d:]
 
+                current_state_static, current_state_static_scale = dynamic_quant(current_state_static)
+                current_hidden_states = torch.ops.hpu.fp8_gemm_v2(
+                    current_state_static,
+                    False,
+                    w2_weight_fp8_slice,
+                    True,
+                    None,
+                    torch.bfloat16,
+                    current_state_static_scale,
+                    w2_scale_fp8_slice.transpose(0, 1),
+                    None,
+                    False,
+                )
+                padded_weight = experts_mask[i + ep_shift].unsqueeze(1)
+                if i == 0:
+                    final_hidden_states = current_hidden_states * padded_weight
+                else:
+                    final_hidden_states.add_(current_hidden_states * padded_weight)
+
+            return final_hidden_states
 
         # result = do_static_moe_with_dynamic_scaling(x,
+        #                                            topk_ids,
+        #                                            topk_weights,
+        #                                            layer.w13_weight,
+        #                                            layer.w2_weight,
+        #                                            num_experts,
+        #                                            num_experts,
+        #                                            layer.w13_weight_scale,
+        #                                            layer.w2_weight_scale)
+        # result = do_dynamic_moe_with_dynamic_scaling(x,
         #                                            topk_ids,
         #                                            topk_weights,
         #                                            layer.w13_weight,

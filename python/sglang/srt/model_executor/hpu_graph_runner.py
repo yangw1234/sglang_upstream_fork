@@ -262,6 +262,7 @@ def create_hpu_dummy_batch_prefill(
         attn_backend=attn_backend,
         token_to_kv_pool=token_to_kv_pool,
         use_contiguous_pa=None,
+        mm_inputs=None,
     )
 
 
@@ -289,6 +290,7 @@ def create_hpu_dummy_batch_decode(
         attn_backend=attn_backend,
         token_to_kv_pool=token_to_kv_pool,
         use_contiguous_pa=USE_CONTIGUOUS_PA,
+        mm_inputs=None,
     )
 
 

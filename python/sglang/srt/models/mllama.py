@@ -1017,6 +1017,7 @@ class MllamaForConditionalGeneration(nn.Module):
                 param = params_dict.pop(name)
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
+    
 
 
 EntryClass = MllamaForConditionalGeneration
