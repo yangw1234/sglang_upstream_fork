@@ -324,7 +324,7 @@ class Scheduler(
         # The current forward batch
         self.cur_batch: Optional[ScheduleBatch] = None
         # The last forward batch
-        self.last_batch: Optional[ScheduleBatch] = None
+        self.last_batch: Optional[ScheduleBatch] = []
         self.forward_ct = 0
         self.forward_ct_decode = 0
         self.num_generated_tokens = 0
@@ -644,7 +644,7 @@ class Scheduler(
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
-                if self.last_batch is None:
+                if not self.last_batch:
                     # Create a dummy first batch to start the pipeline for overlap schedule.
                     # It is now used for triggering the sampling_info_done event.
                     tmp_batch = ScheduleBatch(
@@ -655,18 +655,22 @@ class Scheduler(
                     self.process_batch_result(tmp_batch, None)
 
             if self.last_batch:
-                # Process the results of the last batch
-                tmp_batch, tmp_result = self.result_queue.popleft()
-                tmp_batch.next_batch_sampling_info = (
-                    self.tp_worker.cur_sampling_info if batch else None
-                )
-                self.process_batch_result(tmp_batch, tmp_result)
+                output = self.tp_worker.output_queue.get()
+                if output is not None:
+                    # Process the results of the last batch
+                    tmp_batch, tmp_result = self.result_queue.popleft()
+                    tmp_batch.next_batch_sampling_info = (
+                        self.tp_worker.cur_sampling_info if batch else None
+                    )
+                    self.process_batch_result(tmp_batch, tmp_result, output)
+                    self.last_batch.pop(0)
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
                 self.new_token_ratio = self.init_new_token_ratio
-
-            self.last_batch = batch
+            
+            if batch:
+                self.last_batch.append(batch)
 
     @torch.no_grad()
     def event_loop_normal_disagg_prefill(self):
@@ -1184,29 +1188,30 @@ class Scheduler(
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
-        if self.last_batch and self.last_batch.forward_mode.is_extend():
+        last_batch = self.last_batch[0] if self.last_batch else None
+        if last_batch and last_batch.forward_mode.is_extend():
             if self.chunked_req:
                 # Move the chunked request out of the batch so that we can merge
                 # only finished requests to running_batch.
-                self.last_batch.filter_batch(chunked_req_to_exclude=self.chunked_req)
+                last_batch.filter_batch(chunked_req_to_exclude=self.chunked_req)
                 self.tree_cache.cache_unfinished_req(self.chunked_req)
                 # chunked request keeps its rid but will get a new req_pool_idx
                 self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
                 self.running_batch.batch_is_full = False
 
             # Filter batch
-            last_bs = self.last_batch.batch_size()
-            self.last_batch.filter_batch()
-            if self.last_batch.batch_size() < last_bs:
+            last_bs = last_batch.batch_size()
+            last_batch.filter_batch()
+            if last_batch.batch_size() < last_bs:
                 self.running_batch.batch_is_full = False
 
             # Merge the new batch into the running batch
-            if not self.last_batch.is_empty():
+            if not last_batch.is_empty():
                 if self.running_batch.is_empty():
-                    self.running_batch = self.last_batch
+                    self.running_batch = last_batch
                 else:
                     # Merge running_batch with prefill batch
-                    self.running_batch.merge_batch(self.last_batch)
+                    self.running_batch.merge_batch(last_batch)
 
         new_batch = self.get_new_batch_prefill()
         if new_batch is not None:
@@ -1472,11 +1477,12 @@ class Scheduler(
         self,
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
+        output=None,
     ):
         if batch.forward_mode.is_decode():
-            self.process_batch_result_decode(batch, result)
+            self.process_batch_result_decode(batch, result, output)
         elif batch.forward_mode.is_extend():
-            self.process_batch_result_prefill(batch, result)
+            self.process_batch_result_prefill(batch, result, output)
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
                 self.tp_worker.resolve_batch_result(result.bid)
@@ -1672,7 +1678,7 @@ class Scheduler(
         """Flush the memory pool and cache."""
         if len(self.waiting_queue) == 0 and self.running_batch.is_empty():
             self.cur_batch = None
-            self.last_batch = None
+            self.last_batch = []
             self.tree_cache.reset()
             if self.grammar_backend:
                 self.grammar_backend.reset()

@@ -367,8 +367,8 @@ class MHATokenToKVPool(KVCache):
             self.v_buffer[layer_id][loc] = cache_v
             current_stream.wait_stream(self.alt_stream)
         else:
-            self.k_buffer[layer_id][loc] = cache_k
-            self.v_buffer[layer_id][loc] = cache_v
+            self.k_buffer[layer_id].index_put_((loc,), cache_k)
+            self.v_buffer[layer_id].index_put_((loc,), cache_v)
 
 
 @torch.compile

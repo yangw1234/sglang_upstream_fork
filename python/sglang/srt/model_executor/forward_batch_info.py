@@ -240,7 +240,8 @@ class ForwardBatch:
         batch: ModelWorkerBatch,
         model_runner: ModelRunner,
     ):
-        device = model_runner.device
+        # device = model_runner.device
+        device = "cpu"
         extend_input_logprob_token_ids_gpu = None
         if batch.extend_input_logprob_token_ids is not None:
             extend_input_logprob_token_ids_gpu = (

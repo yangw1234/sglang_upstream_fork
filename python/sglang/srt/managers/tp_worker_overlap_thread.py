@@ -17,7 +17,7 @@ import dataclasses
 import logging
 import signal
 import threading
-from queue import Queue
+from queue import Queue, Empty
 from typing import Optional
 
 import psutil
@@ -45,17 +45,21 @@ logger = logging.getLogger(__name__)
 
 _is_hpu = is_hpu()
 
+if _is_hpu:
+    import habana_frameworks.torch as htorch
 
-@torch.compile(dynamic=True, backend=get_compiler_backend(), disable=_is_hpu)
+
+# @torch.compile(dynamic=True, backend=get_compiler_backend(), disable=_is_hpu)
 def resolve_future_token_ids(input_ids, future_token_ids_map):
-    input_ids[:] = torch.where(
+    input_ids = input_ids.to("hpu")
+    return torch.where(
         input_ids < 0,
         future_token_ids_map[torch.clamp(-input_ids, min=0)],
         input_ids,
     )
 
 
-class TpModelWorkerClient:
+class TpModelWorkerClient:  
     """A tensor parallel model worker."""
 
     def __init__(
@@ -76,11 +80,6 @@ class TpModelWorkerClient:
         # Init future mappings
         self.future_token_ids_ct = 0
         self.future_token_ids_limit = self.max_running_requests * 3
-        self.future_token_ids_map = torch.empty(
-            (self.max_running_requests * 5,),
-            dtype=torch.int64,
-            device=self.scheduler_device,
-        )
 
         # Launch threads
         self.input_queue = Queue()
@@ -126,14 +125,47 @@ class TpModelWorkerClient:
             traceback = get_exception_traceback()
             logger.error(f"TpModelWorkerClient hit an exception: {traceback}")
             self.parent_process.send_signal(signal.SIGQUIT)
+    
+    def sync_and_return_batch(self, cache_output):
+        # torch.hpu.synchronize()
+        cache_logits_output, cache_next_token_ids = cache_output
+        if cache_logits_output.next_token_logprobs:
+            cache_logits_output.next_token_logprobs = (
+                cache_logits_output.next_token_logprobs.cpu()
+            )
+            if cache_logits_output.input_token_logprobs is not None:
+                cache_logits_output.input_token_logprobs = (
+                    cache_logits_output.input_token_logprobs.cpu()
+                )
+        # if cache_logits_output.hidden_states is not None:
+        #     cache_logits_output.hidden_states = cache_logits_output.hidden_states.cpu()
+        cache_next_token_ids = cache_next_token_ids.cpu()
+        return cache_logits_output, cache_next_token_ids
 
     @DynamicGradMode()
     def forward_thread_func_(self):
         batch_pt = 0
         batch_lists = [None] * 2
+        future_token_ids_map = torch.zeros(
+            (self.max_running_requests * 5,),
+            dtype=torch.int64,
+            device=self.worker.device,
+        )
+        cache_output = None
 
         while True:
-            model_worker_batch, future_token_ids_ct = self.input_queue.get()
+            try:
+                model_worker_batch, future_token_ids_ct = self.input_queue.get(timeout=0.001)
+            except Empty as e:
+
+                if cache_output is not None:
+                    htorch.core.mark_step()
+                    print("forward_thread_func_ got an empty batch, return cached batch and continuing")
+                    cpu_output = self.sync_and_return_batch(cache_output)
+                    cache_output = None
+                    self.output_queue.put((None, cpu_output[0], cpu_output[1]))
+                continue
+            print(f"forward_thread_func_ got a new batch, model_worker_batch.req_pool_indices: {model_worker_batch.req_pool_indices}, model_worker_batch.mode: {model_worker_batch.forward_mode}")
             if not model_worker_batch:
                 break
 
@@ -145,45 +177,46 @@ class TpModelWorkerClient:
 
             # Create event
             self.launch_done = threading.Event()
-            copy_done = torch.get_device_module(self.device).Event()
 
+            htorch.core.mark_step()
             # Resolve future tokens in the input
-            input_ids = model_worker_batch.input_ids
-            resolve_future_token_ids(input_ids, self.future_token_ids_map)
-
+            # model_worker_batch.input_ids = model_worker_batch.input_ids.to("hpu")
+            # resolve_future_token_ids(model_worker_batch.input_ids, future_token_ids_map)
+            htorch.core.mark_step()
             # Run forward
             logits_output, next_token_ids = self.worker.forward_batch_generation(
                 model_worker_batch, self.launch_done
             )
+            htorch.core.mark_step()
 
             # Update the future token ids map
+
+            if cache_output is None:
+                print("cache_output is None, starting next batch")
+                self.output_queue.put(None)
+                cache_output = (logits_output, next_token_ids)
+            else:
+                print("cache_output is not None, copying results to CPU and sending to output queue")
+                cache_logits_output, cache_next_token_ids = cache_output
+
+                cache_logits_output, cache_next_token_ids = self.sync_and_return_batch(cache_output)
+                cache_output = (logits_output, next_token_ids)
+
+                self.output_queue.put((None, cache_logits_output, cache_next_token_ids))
+            
+            htorch.core.mark_step()
+
             bs = len(model_worker_batch.seq_lens)
-            self.future_token_ids_map[
+            future_token_ids_map[
                 future_token_ids_ct + 1 : future_token_ids_ct + bs + 1
             ] = next_token_ids
+            htorch.core.mark_step()
 
-            # Copy results to the CPU
-            if model_worker_batch.return_logprob:
-                logits_output.next_token_logprobs = (
-                    logits_output.next_token_logprobs.to("cpu", non_blocking=True)
-                )
-                if logits_output.input_token_logprobs is not None:
-                    logits_output.input_token_logprobs = (
-                        logits_output.input_token_logprobs.to("cpu", non_blocking=True)
-                    )
-            if logits_output.hidden_states is not None:
-                logits_output.hidden_states = logits_output.hidden_states.to(
-                    "cpu", non_blocking=True
-                )
-            next_token_ids = next_token_ids.to("cpu", non_blocking=True)
-            copy_done.record()
+    def resolve_batch_result(self, bid: int, output=None):
+        # _, logits_output, next_token_ids = self.output_queue.get()
+        _, logits_output, next_token_ids = output
 
-            self.output_queue.put((copy_done, logits_output, next_token_ids))
-
-    def resolve_batch_result(self, bid: int):
-        copy_done, logits_output, next_token_ids = self.output_queue.get()
-        copy_done.synchronize()
-        self.launch_done.wait()
+        # self.launch_done.wait()
 
         if logits_output.next_token_logprobs is not None:
             logits_output.next_token_logprobs = (

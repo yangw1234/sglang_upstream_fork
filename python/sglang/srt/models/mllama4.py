@@ -166,6 +166,8 @@ class Llama4ForConditionalGeneration(nn.Module):
                 if "vision" in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                if name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -182,6 +184,8 @@ class Llama4ForConditionalGeneration(nn.Module):
                             if weight_name not in name:
                                 continue
                             name = name.replace(weight_name, param_name)
+                            if name not in params_dict:
+                                continue
                             param = params_dict[name]
                             weight_loader = param.weight_loader
                             weight_loader(
@@ -210,6 +214,8 @@ class Llama4ForConditionalGeneration(nn.Module):
                         for name, loaded_weight, shard_id in zip(
                             name_list, loaded_weight_list, shard_id_list
                         ):
+                            if name not in params_dict:
+                                continue
                             param = params_dict[name]
                             weight_loader = param.weight_loader
                             for expert_id in range(num_experts):

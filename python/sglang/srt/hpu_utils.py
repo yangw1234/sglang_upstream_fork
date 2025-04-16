@@ -88,8 +88,8 @@ class HPUBlockMetadata:
         block_usage = padding_fn(block_usage, _PAD_BLOCK_USAGE)
 
         # Convert to tensors
-        self.block_list = torch.tensor(block_list, dtype=torch.long, device=device)
-        self.block_groups = torch.tensor(block_groups, dtype=torch.long, device=device)
+        self.block_list = torch.tensor(block_list, dtype=torch.int, device=device)
+        self.block_groups = torch.tensor(block_groups, dtype=torch.int, device=device)
         self.block_usage = torch.tensor(
             block_usage, dtype=torch.bfloat16, device=device
         )
@@ -287,7 +287,7 @@ if _is_hpu:
         return attn_bias.unsqueeze(1)
 
     def to_hpu_and_pad_1d(tensor, pad_len, pad_value=0):
-        return torch.nn.functional.pad(tensor.to("hpu"), (0, pad_len), value=pad_value)
+        return torch.nn.functional.pad(tensor.to("hpu", non_blocking=True), (0, pad_len), value=pad_value)
 
     def compute_hpu_attn_bias_decode(page_size, block_usage, dtype):
         mask = torch.arange(0, page_size, device="hpu", dtype=torch.int32).unsqueeze(0)

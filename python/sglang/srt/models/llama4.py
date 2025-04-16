@@ -180,14 +180,14 @@ class Llama4Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
-        self.qk_norm = (
-            RMSNorm(
-                hidden_size=self.head_dim,
-                eps=config.rms_norm_eps,
-            )
-            if self.use_qk_norm
-            else None
-        )
+        self.q_norm = RMSNorm(
+            hidden_size=self.q_size,
+            eps=config.rms_norm_eps,
+        ) if self.use_qk_norm else None
+        self.k_norm = RMSNorm(
+            hidden_size=self.kv_size,
+            eps=config.rms_norm_eps,
+        ) if self.use_qk_norm else None
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=self.head_dim,
@@ -256,24 +256,14 @@ class Llama4Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
 
-        qk, v = qkv.split([self.q_size + self.kv_size, self.kv_size], dim=-1)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.rotary_emb is not None:
-            q_view, k_view = qk.split([self.q_size, self.kv_size], dim=-1)
-            q_out_unused, k_out_unused = self.rotary_emb(positions, q_view, k_view)
-            if (q_out_unused is q_view) and (k_out_unused is k_view):
-                del q_view, k_view, q_out_unused, k_out_unused
-                qk = qk
-            else:
-                qk = torch.cat([q_out_unused, k_out_unused], dim=-1)
-
-        if self.qk_norm is not None:
-            # TODO there are still 2 redundant direct_copy_kernel_cuda for this `reshape` and (in attn backend) q.contiguous(), maybe we can fuse them later
-            qk = qk.reshape(-1, self.head_dim).contiguous().bfloat16()
-            qk = self.qk_norm(qk).to(torch.bfloat16)
-            qk = qk.reshape(-1, self.q_size + self.kv_size)
-
-        q, k = qk.split([self.q_size, self.kv_size], dim=-1)
+            q, k = self.rotary_emb(positions, q, k)
+        if self.q_norm is not None:
+            q = self.q_norm(q.float()).to(q.dtype)
+        if self.k_norm is not None:
+            k = self.k_norm(k.float()).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399) to NoPE layers, where
         # the inference-time temperature tuning function is customized to not affect short context
@@ -375,7 +365,7 @@ class Llama4DecoderLayer(nn.Module):
                 dp_scatter(residual, hidden_states, forward_batch)
                 hidden_states = self.post_attention_layernorm(hidden_states)
             else:
-                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+                # hidden_states = tensor_model_parallel_all_reduce(hidden_states)
                 hidden_states, residual = self.post_attention_layernorm(
                     hidden_states, residual
                 )

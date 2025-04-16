@@ -24,6 +24,7 @@ class SchedulerOutputProcessorMixin:
         self,
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
+        output=None,
     ):
         skip_stream_req = None
 
@@ -43,7 +44,7 @@ class SchedulerOutputProcessorMixin:
             )
 
             if self.enable_overlap:
-                logits_output, next_token_ids = self.tp_worker.resolve_batch_result(bid)
+                logits_output, next_token_ids = self.tp_worker.resolve_batch_result(bid, output)
             else:
                 # Move next_token_ids and logprobs to cpu
                 next_token_ids = next_token_ids.tolist()
@@ -178,6 +179,7 @@ class SchedulerOutputProcessorMixin:
         self,
         batch: ScheduleBatch,
         result: GenerationBatchResult,
+        output=None,
     ):
         logits_output, next_token_ids, bid = (
             result.logits_output,
@@ -187,7 +189,7 @@ class SchedulerOutputProcessorMixin:
         self.num_generated_tokens += len(batch.reqs)
 
         if self.enable_overlap:
-            logits_output, next_token_ids = self.tp_worker.resolve_batch_result(bid)
+            logits_output, next_token_ids = self.tp_worker.resolve_batch_result(bid, output)
             next_token_logprobs = logits_output.next_token_logprobs
         elif batch.spec_algorithm.is_none():
             # spec decoding handles output logprobs inside verify process.

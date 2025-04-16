@@ -18,7 +18,7 @@ import threading
 from typing import Optional, Tuple
 
 import torch
-
+import habana_frameworks.torch as htorch
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.hf_transformers_utils import get_processor, get_tokenizer
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -172,8 +172,10 @@ class TpModelWorker:
         launch_done: Optional[threading.Event] = None,
         skip_sample: bool = False,
     ) -> Tuple[LogitsProcessorOutput, Optional[torch.Tensor]]:
+        htorch.core.mark_step()
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
         logits_output = self.model_runner.forward(forward_batch)
+        htorch.core.mark_step()
         if launch_done:
             launch_done.set()
 
@@ -181,7 +183,7 @@ class TpModelWorker:
             next_token_ids = None
         else:
             next_token_ids = self.model_runner.sample(logits_output, model_worker_batch)
-
+        htorch.core.mark_step()
         return logits_output, next_token_ids
 
     def forward_batch_embedding(self, model_worker_batch: ModelWorkerBatch):

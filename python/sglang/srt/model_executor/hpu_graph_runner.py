@@ -159,14 +159,14 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
             max_prompt_len=max_prompt_len,
             dtype=model_runner.dtype,
         )
-        attn_bias = attn_bias.to("hpu")
-        seq_pos = seq_pos.to("hpu")
-        seq_idx = seq_idx.to("hpu")
+        attn_bias = attn_bias.to("hpu", non_blocking=True)
+        seq_pos = seq_pos.to("hpu", non_blocking=True)
+        seq_idx = seq_idx.to("hpu", non_blocking=True)
         padding_len = max_prompt_len - sum_seq_len
         max_prefill_seqs = model_runner.server_args.max_running_requests
         input_ids = to_hpu_and_pad_1d(forward_batch.input_ids, padding_len)
         positions = to_hpu_and_pad_1d(forward_batch.positions, padding_len)
-        valid_seq_len = sum_seq_len.to("hpu", dtype=torch.int64)
+        valid_seq_len = sum_seq_len.to("hpu", dtype=torch.int64, non_blocking=True)
         extend_seq_lens_padded = to_hpu_and_pad_1d(
             forward_batch.extend_seq_lens, max_prefill_seqs - batch_size
         )
@@ -189,18 +189,17 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         valid_seq_len = torch.ones(padded_batch_size, dtype=torch.int64, device="hpu")
         out_cache_loc = to_hpu_and_pad_1d(forward_batch.out_cache_loc, padding_len)
         batch_size = padded_batch_size
-        attn_bias = compute_hpu_attn_bias_decode(
-            page_size, forward_batch.hpu_metadata.block_usage, model_runner.dtype
-        )
+        block_num = forward_batch.hpu_metadata.block_list.shape[0]
+        attn_bias = torch.zeros(block_num, page_size, dtype=model_runner.dtype, device="cpu").to("hpu", non_blocking=True)
 
         seq_pos = None
         seq_idx = None
         extend_seq_lens_padded = None
 
-        block_list = forward_batch.hpu_metadata.block_list.to("hpu")
-        block_mapping = forward_batch.hpu_metadata.block_mapping.to("hpu")
-        block_groups = forward_batch.hpu_metadata.block_groups.to("hpu")
-        block_usage = forward_batch.hpu_metadata.block_usage.to("hpu")
+        block_list = forward_batch.hpu_metadata.block_list.to("hpu", non_blocking=True)
+        block_mapping = forward_batch.hpu_metadata.block_mapping.to("hpu", non_blocking=True)
+        block_groups = forward_batch.hpu_metadata.block_groups.to("hpu", non_blocking=True)
+        block_usage = forward_batch.hpu_metadata.block_usage.to("hpu", non_blocking=True)
         use_contiguous_pa = forward_batch.hpu_metadata.use_contiguous_pa
     
     if forward_batch.contains_mm_inputs():
@@ -262,6 +261,7 @@ def create_hpu_dummy_batch_prefill(
         attn_backend=attn_backend,
         token_to_kv_pool=token_to_kv_pool,
         use_contiguous_pa=None,
+        mm_inputs=None
     )
 
 
@@ -280,7 +280,7 @@ def create_hpu_dummy_batch_decode(
         valid_seq_len=torch.ones(batch_size, dtype=torch.int64, device="hpu"),
         extend_seq_lens=None,
         page_size=page_size,
-        block_list=torch.zeros(block_num, dtype=torch.int64, device="hpu"),
+        block_list=torch.zeros(block_num, dtype=torch.int32, device="hpu"),
         block_mapping=torch.zeros(
             block_num, batch_size, dtype=torch.bfloat16, device="hpu"
         ),
@@ -289,6 +289,7 @@ def create_hpu_dummy_batch_decode(
         attn_backend=attn_backend,
         token_to_kv_pool=token_to_kv_pool,
         use_contiguous_pa=USE_CONTIGUOUS_PA,
+        mm_inputs=None
     )
 
 
@@ -309,6 +310,10 @@ class HPUAdapter:
                 compute_hpu_attn_bias_prefill(
                     input_batch.seq_pos, input_batch.seq_idx, self.dtype
                 )
+            )
+        else:
+            input_batch.attn_bias.copy_(
+                compute_hpu_attn_bias_decode(input_batch.page_size, input_batch.block_usage, self.dtype)
             )
         return self.model(*args, **kwargs)
 
