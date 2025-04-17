@@ -440,7 +440,7 @@ class ModelRunner:
             )
 
         if self.server_args.enable_torch_compile:
-            self.model = torch.compile(self.model, backend=get_compiler_backend())
+            self.model = torch.compile(self.model, backend=get_compiler_backend(), dynamic=False)
 
         monkey_patch_vllm_parallel_state(reverse=True)
         monkey_patch_isinstance_for_vllm_base_layer(reverse=True)
