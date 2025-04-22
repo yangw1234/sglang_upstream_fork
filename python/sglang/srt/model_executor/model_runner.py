@@ -82,7 +82,6 @@ from sglang.srt.utils import (
     enable_show_time_cost,
     get_available_gpu_memory,
     get_bool_env_var,
-    get_scheduler_device,
     init_custom_process_group,
     is_cuda,
     is_fa3_default_architecture,
@@ -812,7 +811,7 @@ class ModelRunner:
             self.req_to_token_pool = ReqToTokenPool(
                 size=max_num_reqs + 1,
                 max_context_len=self.model_config.context_len + 4,
-                device=get_scheduler_device(self.device),
+                device=self.device,
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
         else:
@@ -868,7 +867,7 @@ class ModelRunner:
                         self.max_total_num_tokens,
                         page_size=self.page_size,
                         dtype=self.kv_cache_dtype,
-                        device=get_scheduler_device(self.device),
+                        device=self.device,
                         kvcache=self.token_to_kv_pool,
                     )
                 else:
@@ -876,7 +875,7 @@ class ModelRunner:
                         self.max_total_num_tokens,
                         page_size=self.page_size,
                         dtype=self.kv_cache_dtype,
-                        device=get_scheduler_device(self.device),
+                        device=self.device,
                         kvcache=self.token_to_kv_pool,
                     )
         else:
