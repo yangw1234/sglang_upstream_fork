@@ -108,6 +108,11 @@ def get_int_env_var(name: str, default: int = 0) -> int:
         return default
 
 
+def get_int_env_var(name: str, default: int = 0) -> int:
+    value = os.getenv(name, default)
+    return int(value)
+
+
 # https://pytorch.org/docs/stable/notes/hip.html#checking-for-hip
 def is_hip() -> bool:
     return torch.version.hip is not None
