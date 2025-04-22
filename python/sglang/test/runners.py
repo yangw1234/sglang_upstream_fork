@@ -28,7 +28,7 @@ from transformers import (
 
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.server import Engine
-from sglang.srt.utils import load_image
+from sglang.srt.utils import get_device, load_image
 from sglang.test.test_utils import DEFAULT_PORT_FOR_SRT_TEST_RUNNER, calculate_rouge_l
 
 DEFAULT_PROMPTS = [
@@ -69,7 +69,7 @@ def get_token_ids_logprobs(logits, token_ids):
     return logprobs
 
 
-def _get_sentence_transformer_embedding_model(model_path, torch_dtype):
+def _get_sentence_transformer_embedding_model(model_path, torch_dtype, device):
     from sentence_transformers import SentenceTransformer
     from sentence_transformers.util import is_sentence_transformer_model
 
@@ -88,7 +88,7 @@ def _get_sentence_transformer_embedding_model(model_path, torch_dtype):
         )
         model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
 
-    return model.cuda()
+    return model.to(device)
 
 
 @dataclass
@@ -118,7 +118,7 @@ class HFRunner:
         self.model_type = model_type
         self.output_str_only = output_str_only
         self.trust_remote_code = trust_remote_code
-
+        self.device = get_device()
         self.in_queue = mp.Queue()
         self.out_queue = mp.Queue()
 
@@ -221,7 +221,7 @@ class HFRunner:
                 torch_dtype=torch_dtype,
                 trust_remote_code=self.trust_remote_code,
                 low_cpu_mem_usage=True,
-            ).cuda()
+            ).to(self.device)
         elif self.model_type == "embedding":
             if "gme-qwen2-vl" in model_path.lower():
                 self.model = AutoModelForVision2Seq.from_pretrained(
@@ -229,14 +229,14 @@ class HFRunner:
                     torch_dtype=torch_dtype,
                     trust_remote_code=False,
                     low_cpu_mem_usage=True,
-                ).cuda()
+                ).to(self.device)
                 self.processor = AutoProcessor.from_pretrained(model_path)
             elif "clip" in model_path.lower():
-                self.model = AutoModel.from_pretrained(model_path).cuda()
+                self.model = AutoModel.from_pretrained(model_path).to(self.device)
                 self.processor = AutoProcessor.from_pretrained(model_path)
             else:
                 self.model = _get_sentence_transformer_embedding_model(
-                    model_path, torch_dtype
+                    model_path, torch_dtype, self.device
                 )
         elif self.model_type == "reward":
             from transformers import AutoModelForSequenceClassification
@@ -245,7 +245,7 @@ class HFRunner:
                 model_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=self.needs_trust_remote_code(model_path),
-            ).cuda()
+            ).to(self.device)
         else:
             raise Exception(f"Unrecognized model type {self.model_type}")
         self.tokenizer = get_tokenizer(
@@ -287,15 +287,19 @@ class HFRunner:
                                 images=image[0], return_tensors="pt"
                             )
                             logits = self.model.get_image_features(
-                                pixel_values=inputs.data["pixel_values"].cuda(),
+                                pixel_values=inputs.data["pixel_values"].to(
+                                    self.device
+                                ),
                             ).tolist()
                         else:
                             inputs = self.tokenizer(
                                 prompts, padding=True, return_tensors="pt"
                             )
                             logits = self.model.get_text_features(
-                                input_ids=inputs.data["input_ids"].cuda(),
-                                attention_mask=inputs.data["attention_mask"].cuda(),
+                                input_ids=inputs.data["input_ids"].to(self.device),
+                                attention_mask=inputs.data["attention_mask"].to(
+                                    self.device
+                                ),
                             ).tolist()
                     else:
                         logits = self.model.encode(prompts).tolist()
@@ -309,7 +313,7 @@ class HFRunner:
                         )
                         conv_tokenized = self.tokenizer(
                             conv_formatted, return_tensors="pt"
-                        ).to("cuda")
+                        ).to(self.device)
                         scores.append(
                             float(self.model(**conv_tokenized).logits[0][0].item())
                         )
@@ -360,12 +364,12 @@ class HFRunner:
             token_ids_output_logprobs = []
         else:
             token_ids_input_logprobs = token_ids_output_logprobs = None
-
+        device = get_device()
         for i, p in enumerate(prompts):
             if isinstance(p, str):
-                input_ids = tokenizer.encode(p, return_tensors="pt").cuda()
+                input_ids = tokenizer.encode(p, return_tensors="pt").to(device)
             else:
-                input_ids = torch.tensor([p], device="cuda")
+                input_ids = torch.tensor([p], device=device)
 
             if lora_paths is not None and lora_paths[i] is not None:
                 from peft import PeftModel
