@@ -8,12 +8,19 @@ import torch
 import torch.nn as nn
 
 from sglang.srt.custom_op import CustomOp
-from sglang.srt.utils import is_cuda
+from sglang.srt.utils import is_cuda, is_hip, is_hpu
 
 _is_cuda = is_cuda()
+_is_hip = is_hip()
+_is_hpu = is_hpu()
 
 if _is_cuda:
     from sgl_kernel import apply_rope_with_cos_sin_cache_inplace
+    from vllm.model_executor.layers.rotary_embedding import (
+        apply_rotary_pos_emb as vllm_rotary_embedding,
+    )
+else:
+    from vllm._custom_ops import rotary_embedding as vllm_rotary_embedding
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -146,6 +153,22 @@ class RotaryEmbedding(CustomOp):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if torch.compiler.is_compiling():
+            return self.forward_native(positions, query, key, offsets)
+        if _is_cuda:
+            return self.forward_cuda(positions, query, key, offsets)
+        elif _is_hpu:
+            return self.forward_hpu(positions, query, key, offsets)
+        else:
+            return self.forward_native(positions, query, key, offsets)
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -173,6 +196,29 @@ class RotaryEmbedding(CustomOp):
                 self.is_neox_style,
             )
         return query, key
+        
+    def forward_hpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from habana_frameworks.torch.hpex.kernels import apply_rotary_pos_emb as hpu_apply_rotary_pos_emb
+        
+        if offsets is not None:
+            positions = positions + offsets
+        positions = positions.flatten()
+        
+        # Get cos and sin from cache
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        
+        # Apply rotary embeddings using HPU kernel
+        query_out = hpu_apply_rotary_pos_emb(query, cos, sin, self.is_neox_style)
+        key_out = hpu_apply_rotary_pos_emb(key, cos, sin, self.is_neox_style)
+        
+        return query_out, key_out
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"

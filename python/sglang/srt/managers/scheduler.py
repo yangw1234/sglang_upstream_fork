@@ -328,6 +328,11 @@ class Scheduler(
         self.last_decode_stats_tic = time.time()
         self.last_prefill_stats_tic = time.time()
         self.return_health_check_ct = 0
+        # Use CPU scheduler for HPU devices
+        if self.device == "hpu":
+            self.device = "cpu"
+            logger.info("HPU device detected, using CPU scheduler")
+            
         self.current_stream = torch.get_device_module(self.device).current_stream()
         if self.device == "cpu":
             self.current_stream.synchronize = lambda: None  # No-op for CPU
