@@ -58,6 +58,8 @@ class RMSNorm(CustomOp):
             return self.forward_cuda(*args, **kwargs)
         elif _is_hip:
             return self.forward_hip(*args, **kwargs)
+        elif _is_hpu:
+            return self.forward_hpu(*args, **kwargs)
         else:
             return self.forward_native(*args, **kwargs)
 
@@ -124,6 +126,8 @@ class GemmaRMSNorm(CustomOp):
             return self.forward_native(*args, **kwargs)
         if _is_cuda:
             return self.forward_cuda(*args, **kwargs)
+        elif _is_hpu:
+            return self.forward_hpu(*args, **kwargs)
         else:
             return self.forward_native(*args, **kwargs)
 
@@ -155,6 +159,27 @@ class GemmaRMSNorm(CustomOp):
             )
             return x, residual
         out = gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
+        return out
+        
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from habana_frameworks.torch.hpex.kernels import rms_norm as hpu_rms_norm
+
+        if not x.is_contiguous():
+            x = x.contiguous()
+
+        if residual is not None:
+            # Add residual to x
+            x = x + residual
+            # Apply RMSNorm with Gemma-style weight
+            out = hpu_rms_norm(x, self.weight.data, self.variance_epsilon)
+            return out, residual
+
+        # Apply RMSNorm directly
+        out = hpu_rms_norm(x, self.weight.data, self.variance_epsilon)
         return out
 
 
