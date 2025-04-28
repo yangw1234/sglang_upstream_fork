@@ -803,10 +803,22 @@ class ModelRunner:
             )
 
         if self.req_to_token_pool is None:
+            # Check if we're running on HPU
+            is_hpu = False
+            try:
+                import habana_frameworks.torch as ht
+                is_hpu = True
+                logger.info("HPU detected. Using CPU for req_to_token_pool.")
+            except ImportError:
+                pass
+            
+            # Use CPU device for req_to_token_pool when running on HPU
+            pool_device = "cpu" if is_hpu else self.device
+            
             self.req_to_token_pool = ReqToTokenPool(
                 size=max_num_reqs + 1,
                 max_context_len=self.model_config.context_len + 4,
-                device=self.device,
+                device=pool_device,
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
         else:

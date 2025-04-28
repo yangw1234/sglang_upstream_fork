@@ -113,7 +113,6 @@ from sglang.srt.managers.utils import validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.radix_cache import RadixCache
-from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.reasoning_parser import ReasoningParser
@@ -478,23 +477,9 @@ class Scheduler(
     def init_memory_pool_and_cache(self):
         server_args = self.server_args
 
-        # Get memory pools from the worker
-        req_to_token_pool, self.token_to_kv_pool_allocator = (
+        self.req_to_token_pool, self.token_to_kv_pool_allocator = (
             self.tp_worker.get_memory_pool()
         )
-        
-        # If HPU is detected, ensure req_to_token_pool is on CPU
-        if _is_hpu and req_to_token_pool.device != "cpu":
-            logger.info("HPU detected. Moving req_to_token_pool to CPU for scheduler operations.")
-            # Create a new pool on CPU with the same parameters
-            self.req_to_token_pool = ReqToTokenPool(
-                size=req_to_token_pool.size,
-                max_context_len=req_to_token_pool.max_context_len,
-                device="cpu",
-                enable_memory_saver=self.server_args.enable_memory_saver,
-            )
-        else:
-            self.req_to_token_pool = req_to_token_pool
 
         if (
             server_args.chunked_prefill_size is not None
