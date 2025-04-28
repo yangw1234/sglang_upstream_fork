@@ -22,10 +22,11 @@ import torch.nn as nn
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.utils import is_cuda, is_hip, is_hpu
 
+logger = logging.getLogger(__name__)
+
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_hpu = is_hpu()
-
 
 if _is_cuda:
     from sgl_kernel import (
@@ -36,9 +37,18 @@ if _is_cuda:
     )
 
 if _is_hip:
-    from vllm._custom_ops import fused_add_rms_norm, rms_norm
+    from aiter.ops.rmsnorm import rms_norm, rmsnorm2d_fwd_with_add
 
-logger = logging.getLogger(__name__)
+    rmsnorm = rms_norm
+
+    def fused_add_rmsnorm(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        w: torch.Tensor,
+        eps: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        rmsnorm2d_fwd_with_add(x, x, residual, residual, w, eps)
+        return x, residual
 
 
 class RMSNorm(CustomOp):
@@ -58,6 +68,8 @@ class RMSNorm(CustomOp):
             return self.forward_cuda(*args, **kwargs)
         elif _is_hip:
             return self.forward_hip(*args, **kwargs)
+        elif _is_hpu:
+            return self.forward_hpu(*args, **kwargs)
         else:
             return self.forward_native(*args, **kwargs)
 
@@ -81,10 +93,31 @@ class RMSNorm(CustomOp):
             # NOTE: Romove this if aiter kernel supports discontinuous input
             x = x.contiguous()
         if residual is not None:
-            fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)
+            fused_add_rmsnorm(x, residual, self.weight.data, self.variance_epsilon)
             return x, residual
         out = torch.empty_like(x)
         rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        return out
+        
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from habana_frameworks.torch.hpex.kernels import rms_norm as hpu_rms_norm
+
+        if not x.is_contiguous():
+            x = x.contiguous()
+
+        if residual is not None:
+            # Add residual to x
+            x = x + residual
+            # Apply RMSNorm
+            out = hpu_rms_norm(x, self.weight.data, self.variance_epsilon)
+            return out, residual
+
+        # Apply RMSNorm directly
+        out = hpu_rms_norm(x, self.weight.data, self.variance_epsilon)
         return out
 
     def forward_native(
@@ -124,6 +157,8 @@ class GemmaRMSNorm(CustomOp):
             return self.forward_native(*args, **kwargs)
         if _is_cuda:
             return self.forward_cuda(*args, **kwargs)
+        elif _is_hpu:
+            return self.forward_hpu(*args, **kwargs)
         else:
             return self.forward_native(*args, **kwargs)
 
@@ -155,6 +190,27 @@ class GemmaRMSNorm(CustomOp):
             )
             return x, residual
         out = gemma_rmsnorm(x, self.weight.data, self.variance_epsilon)
+        return out
+        
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from habana_frameworks.torch.hpex.kernels import rms_norm as hpu_rms_norm
+
+        if not x.is_contiguous():
+            x = x.contiguous()
+
+        if residual is not None:
+            # Add residual to x
+            x = x + residual
+            # Apply RMSNorm with Gemma-style weight
+            out = hpu_rms_norm(x, self.weight.data, self.variance_epsilon)
+            return out, residual
+
+        # Apply RMSNorm directly
+        out = hpu_rms_norm(x, self.weight.data, self.variance_epsilon)
         return out
 
 

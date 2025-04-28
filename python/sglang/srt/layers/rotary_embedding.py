@@ -8,12 +8,19 @@ import torch
 import torch.nn as nn
 
 from sglang.srt.custom_op import CustomOp
-from sglang.srt.utils import is_cuda
+from sglang.srt.utils import is_cuda, is_hip, is_hpu
 
 _is_cuda = is_cuda()
+_is_hip = is_hip()
+_is_hpu = is_hpu()
 
 if _is_cuda:
     from sgl_kernel import apply_rope_with_cos_sin_cache_inplace
+    from vllm.model_executor.layers.rotary_embedding import (
+        apply_rotary_pos_emb as vllm_rotary_embedding,
+    )
+else:
+    from vllm._custom_ops import rotary_embedding as vllm_rotary_embedding
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -146,6 +153,22 @@ class RotaryEmbedding(CustomOp):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if torch.compiler.is_compiling():
+            return self.forward_native(positions, query, key, offsets)
+        if _is_cuda and self.head_size in [64, 128, 256, 512]:
+            return self.forward_cuda(positions, query, key, offsets)
+        elif _is_hpu:
+            return self.forward_hpu(positions, query, key, offsets)
+        else:
+            return self.forward_native(positions, query, key, offsets)
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -164,7 +187,7 @@ class RotaryEmbedding(CustomOp):
             )
         else:
             self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
-            self.vllm_rotary_embedding(
+            vllm_rotary_embedding(
                 positions,
                 query,
                 key,
@@ -172,6 +195,56 @@ class RotaryEmbedding(CustomOp):
                 self.cos_sin_cache,
                 self.is_neox_style,
             )
+        return query, key
+
+    def forward_hpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from habana_frameworks.torch.hpex.kernels import (
+            RotaryPosEmbeddingMode,
+            apply_rotary_pos_emb,
+        )
+
+        positions = positions.flatten()
+        if offsets is not None:
+            positions = positions + offsets
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, positions).view(num_tokens, 1, -1)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
+        # to query hidden dimension, so the original tensors need to be
+        # expanded
+        # GPT-NeoX kernel requires position_ids = None, offset, mode = BLOCKWISE
+        # and expansion of cos/sin tensors via concatenation
+        # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
+        # and expansion of cos/sin tensors via repeat_interleave
+        rope_mode: RotaryPosEmbeddingMode
+        if self.is_neox_style:
+            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
+            cos = torch.cat((cos, cos), dim=-1)
+            sin = torch.cat((sin, sin), dim=-1)
+        else:
+            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+            sin = torch.repeat_interleave(sin, 2, dim=-1, output_size=cos_sin.shape[-1])
+            cos = torch.repeat_interleave(cos, 2, dim=-1, output_size=cos_sin.shape[-1])
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
+        key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
     def extra_repr(self) -> str:
