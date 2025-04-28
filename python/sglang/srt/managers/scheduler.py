@@ -289,12 +289,20 @@ class Scheduler(
             self.max_req_len,
             self.max_req_input_len,
             self.random_seed,
-            self.device,
+            device,
             worker_global_server_args_dict,
             _,
             _,
             _,
         ) = self.tp_worker.get_worker_info()
+        
+        # Use CPU for scheduler when the underlying accelerator is HPU
+        if _is_hpu:
+            self.device = "cpu"
+            logger.info("HPU detected. Using CPU for scheduler operations.")
+        else:
+            self.device = device
+            
         self.tp_cpu_group = self.tp_worker.get_tp_cpu_group()
         self.attn_tp_cpu_group = self.tp_worker.get_attention_tp_cpu_group()
         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
