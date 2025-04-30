@@ -126,6 +126,7 @@ from sglang.srt.utils import (
     crash_on_warnings,
     get_bool_env_var,
     get_zmq_socket,
+    is_hpu,
     kill_itself_when_parent_died,
     pyspy_dump_schedulers,
     set_gpu_proc_affinity,
@@ -133,6 +134,8 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
+
+_is_hpu = is_hpu()
 
 expert_distribution_recorder = ExpertDistributionRecorder()
 
@@ -1864,6 +1867,8 @@ class Scheduler(
             "CPU": torch.profiler.ProfilerActivity.CPU,
             "GPU": torch.profiler.ProfilerActivity.CUDA,
         }
+        if _is_hpu:
+            activity_map["HPU"] = torch.profiler.ProfilerActivity.HPU
         torchprof_activities = [
             activity_map[a] for a in activities if a in activity_map
         ]
