@@ -9,6 +9,7 @@ import torch
 
 import sglang.srt.sampling.penaltylib as penaltylib
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+from sglang.srt.utils import is_hpu
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,10 @@ class SamplingBatchInfo:
     def from_schedule_batch(cls, batch: ScheduleBatch, vocab_size: int):
         reqs = batch.reqs
         device = batch.device
+
+        if is_hpu():
+            device = "hpu"
+
         temperatures = (
             torch.tensor(
                 [r.sampling_params.temperature for r in reqs],
