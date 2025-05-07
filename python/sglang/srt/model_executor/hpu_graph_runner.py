@@ -262,7 +262,6 @@ class HPUGraphRunner:
             model_runner.model_config.hf_config.model_type
         )
 
-        assert "fsdpa" in enabled_flags(), "Prefill with FusedSDPA is not supported."
         self.is_lazy = 1 if htorch.utils.internal.is_lazy() else 0
         if self.is_lazy:
             self.model = htorch.hpu.wrap_in_hpu_graph(
