@@ -47,7 +47,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            if is_fp8_fnuz():
+            if False and is_fp8_fnuz():
                 input_scale = getattr(layer, "input_scale", None)
 
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(

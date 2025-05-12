@@ -395,7 +395,7 @@ def apply_fp8_linear(
                 else ops.scaled_fp8_quant(
                     input_2d,
                     input_scale,
-                    num_token_padding=output_padding,
+                    batch_dim_padding=output_padding,
                     use_per_token_if_dynamic=use_per_token_if_dynamic,
                 )
             )

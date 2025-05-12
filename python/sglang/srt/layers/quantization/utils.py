@@ -55,7 +55,7 @@ def is_layer_skipped(
 def per_tensor_dequantize(
     tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]
 ) -> torch.Tensor:
-    fake_qweight = tensor.to(torch.float16)
+    fake_qweight = tensor.to(torch.bfloat16)
     dq_weight = fake_qweight * inv_scale
     return dq_weight
 
