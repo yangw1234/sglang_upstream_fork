@@ -492,7 +492,7 @@ class Fp8LinearOp:
                 qinput, x_scale = ops.scaled_fp8_quant(
                     input_2d,
                     input_scale,
-                    num_token_padding=self.output_padding,
+                    batch_dim_padding=self.output_padding,
                     use_per_token_if_dynamic=use_per_token_if_dynamic,
                 )
 
