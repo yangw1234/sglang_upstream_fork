@@ -42,6 +42,10 @@ from sglang.srt.layers.dp_attention import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.quantization import monkey_patch_isinstance_for_vllm_base_layer
+from sglang.srt.layers.quantization.deep_gemm import (
+    _ENABLE_JIT_DEEPGEMM,
+    update_deep_gemm_config,
+)
 from sglang.srt.layers.sampler import Sampler
 from sglang.srt.layers.torchao_utils import apply_torchao_config_to_model
 from sglang.srt.lora.lora_manager import LoRAManager
@@ -77,7 +81,7 @@ from sglang.srt.utils import (
     MultiprocessingSerializer,
     enable_show_time_cost,
     get_available_gpu_memory,
-    get_compiler_backend,
+    get_bool_env_var,
     get_scheduler_device,
     init_custom_process_group,
     is_cuda,
@@ -94,10 +98,14 @@ from sglang.srt.utils import (
 )
 
 _is_hpu = is_hpu()
-logger = logging.getLogger(__name__)
 
+# Use a small KV cache pool size for tests in CI
 SGLANG_CI_SMALL_KV_SIZE = os.getenv("SGLANG_CI_SMALL_KV_SIZE", None)
+
+# Detect stragger ranks in model loading
 UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
+
+logger = logging.getLogger(__name__)
 
 
 class ModelRunner:
@@ -135,10 +143,7 @@ class ModelRunner:
         self.page_size = server_args.page_size
         self.req_to_token_pool = req_to_token_pool
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
-        self.use_mla_backend = (
-            self.model_config.attention_arch == AttentionArch.MLA
-            and not server_args.disable_mla
-        )
+        self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
 
         # Model-specific adjustment
@@ -147,18 +152,12 @@ class ModelRunner:
         if server_args.show_time_cost:
             enable_show_time_cost()
 
-        if server_args.disable_outlines_disk_cache:
-            from outlines.caching import disable_cache
-
-            disable_cache()
-
         # Global vars
         global_server_args_dict.update(
             {
                 "attention_backend": server_args.attention_backend,
                 "sampling_backend": server_args.sampling_backend,
                 "triton_attention_reduce_in_fp32": server_args.triton_attention_reduce_in_fp32,
-                "disable_mla": server_args.disable_mla,
                 "torchao_config": server_args.torchao_config,
                 "enable_nan_detection": server_args.enable_nan_detection,
                 "enable_dp_attention": server_args.enable_dp_attention,
@@ -168,13 +167,12 @@ class ModelRunner:
                 "device": server_args.device,
                 "speculative_accept_threshold_single": server_args.speculative_accept_threshold_single,
                 "speculative_accept_threshold_acc": server_args.speculative_accept_threshold_acc,
-                "enable_flashmla": server_args.enable_flashmla,
                 "disable_radix_cache": server_args.disable_radix_cache,
                 "flashinfer_mla_disable_ragged": server_args.flashinfer_mla_disable_ragged,
+                "moe_dense_tp_size": server_args.moe_dense_tp_size,
                 "debug_tensor_dump_output_folder": server_args.debug_tensor_dump_output_folder,
                 "debug_tensor_dump_inject": server_args.debug_tensor_dump_inject,
                 "n_share_experts_fusion": server_args.n_share_experts_fusion,
-                "disable_shared_experts_fusion": server_args.disable_shared_experts_fusion,
                 "disable_chunked_prefix_cache": server_args.disable_chunked_prefix_cache,
                 "use_mla_backend": self.use_mla_backend,
             }
@@ -186,7 +184,11 @@ class ModelRunner:
         # Get memory before model loading
         min_per_gpu_memory = self.init_torch_distributed()
 
-        # If it is a draft model tp_group can be different.
+        # Update deep gemm configure
+        if _ENABLE_JIT_DEEPGEMM:
+            update_deep_gemm_config(gpu_id, server_args)
+
+        # If it is a draft model, tp_group can be different
         self.initialize(min_per_gpu_memory)
 
     def initialize(self, min_per_gpu_memory: float):
@@ -240,17 +242,20 @@ class ModelRunner:
     def model_specific_adjustment(self):
         server_args = self.server_args
 
-        if server_args.enable_flashinfer_mla:
-            # TODO: remove this branch after enable_flashinfer_mla is deprecated
-            logger.info("MLA optimization is turned on. Use flashinfer backend.")
-            server_args.attention_backend = "flashinfer"
-        elif server_args.enable_flashmla:
-            # TODO: remove this branch after enable_flashmla is deprecated
-            logger.info("MLA optimization is turned on. Use flashmla decode.")
-            server_args.attention_backend = "flashmla"
-        elif server_args.attention_backend is None:
-            # By default, use flashinfer for non-mla attention and triton for mla attention
+        if server_args.attention_backend is None:
+            """
+            Auto select the fastest attention backend.
+
+            1. Models with MHA Architecture (e.g: Llama, QWen)
+                1.1 We will turn on FA3 on hopper unless user use spec decode with topk > 1 or page_size > 1.
+                1.2 In other cases, we will use flashinfer if available, otherwise use triton.
+            2. Models with MLA Architecture and using FA3
+                2.1 We will use FA3 backend on hopper.
+                2.2 Otherwise, we will use triton backend.
+            """
+
             if not self.use_mla_backend:
+                # MHA architecture
                 if (
                     is_hopper_with_cuda_12_3()
                     and is_no_spec_infer_or_topk_one(server_args)
@@ -262,9 +267,8 @@ class ModelRunner:
                         "flashinfer" if is_flashinfer_available() else "triton"
                     )
             else:
-                if is_hopper_with_cuda_12_3() and is_no_spec_infer_or_topk_one(
-                    server_args
-                ):
+                # MLA architecture
+                if is_hopper_with_cuda_12_3():
                     server_args.attention_backend = "fa3"
                 else:
                     server_args.attention_backend = "triton"
@@ -272,9 +276,14 @@ class ModelRunner:
                 f"Attention backend not set. Use {server_args.attention_backend} backend by default."
             )
         elif self.use_mla_backend:
-            # TODO: add MLA optimization on CPU
             if server_args.device != "cpu":
-                if server_args.attention_backend in ["flashinfer", "fa3", "triton"]:
+                if server_args.attention_backend in [
+                    "flashinfer",
+                    "fa3",
+                    "triton",
+                    "flashmla",
+                    "cutlass_mla",
+                ]:
                     logger.info(
                         f"MLA optimization is turned on. Use {server_args.attention_backend} backend."
                     )
@@ -283,7 +292,7 @@ class ModelRunner:
                         f"Invalid attention backend for MLA: {server_args.attention_backend}"
                     )
             else:
-                raise ValueError(f"MLA optimization not supported on CPU.")
+                raise ValueError("MLA optimization not supported on CPU.")
 
         if (
             server_args.attention_backend == "fa3"
@@ -318,20 +327,7 @@ class ModelRunner:
             )
             server_args.chunked_prefill_size = -1
 
-            if self.model_config.hf_config.architectures == [
-                "Qwen2VLForConditionalGeneration"
-            ] or self.model_config.hf_config.architectures == [
-                "Qwen2_5_VLForConditionalGeneration"
-            ]:
-                # TODO: qwen2-vl series does not support radix cache now, set disable_radix_cache=True automatically
-                logger.info("Automatically disable radix cache for qwen-vl series.")
-                server_args.disable_radix_cache = True
-
-        if server_args.enable_deepep_moe:
-            logger.info(f"DeepEP is turned on. DeepEP mode: {server_args.deepep_mode}")
-
         if not self.use_mla_backend:
-            logger.info("Disable chunked prefix cache for non-MLA backend.")
             server_args.disable_chunked_prefix_cache = True
         elif self.page_size > 1:
             logger.info("Disable chunked prefix cache when page size > 1.")
@@ -398,10 +394,16 @@ class ModelRunner:
         local_gpu_memory = get_available_gpu_memory(self.device, self.gpu_id)
         if self.tp_size > 1:
             if min_per_gpu_memory < local_gpu_memory * 0.9:
-                raise ValueError(
-                    "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
-                    f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
-                )
+                if get_bool_env_var("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK"):
+                    logger.warning(
+                        "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
+                        f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
+                    )
+                else:
+                    raise ValueError(
+                        "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
+                        f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
+                    )
 
         logger.info(
             f"Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
@@ -950,6 +952,12 @@ class ModelRunner:
             )
 
             self.attn_backend = FlashAttentionBackend(self)
+        elif self.server_args.attention_backend == "cutlass_mla":
+            from sglang.srt.layers.attention.cutlass_mla_backend import (
+                CutlassMLABackend,
+            )
+
+            self.attn_backend = CutlassMLABackend(self)
         else:
             raise ValueError(
                 f"Invalid attention backend: {self.server_args.attention_backend}"
@@ -998,7 +1006,7 @@ class ModelRunner:
         after_mem = get_available_gpu_memory(self.device, self.gpu_id)
         logger.info(
             f"Capture cuda graph end. Time elapsed: {time.time() - tic:.2f} s. "
-            f"avail mem={after_mem:.2f} GB. mem usage={(before_mem - after_mem):.2f} GB."
+            f"mem usage={(before_mem - after_mem):.2f} GB. avail mem={after_mem:.2f} GB."
         )
 
     def apply_torch_tp(self):

@@ -310,6 +310,7 @@ class PagedTokenToKVPoolAllocator:
 
         if self.debug_mode:
             assert len(torch.unique(out_indices)) == len(out_indices)
+
         merged_value = self.ret_values.item()
         num_new_pages = merged_value >> 32
         if num_new_pages > len(self.free_pages):

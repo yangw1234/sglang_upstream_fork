@@ -11,11 +11,10 @@ import sglang.srt.sampling.penaltylib as penaltylib
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
 from sglang.srt.utils import get_device
 
-logger = logging.getLogger(__name__)
-
-
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass

@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Set, Type
 
 import torch
 
+from sglang.srt.utils import get_device
+
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
 
@@ -18,7 +20,7 @@ class BatchedPenalizerOrchestrator:
     ):
         self.vocab_size = vocab_size
         self.batch = batch
-        self.device = batch.device
+        self.device = get_device()
         self.penalizers = {Penalizer: Penalizer(self) for Penalizer in penalizers}
 
         is_required = False

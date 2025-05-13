@@ -40,6 +40,10 @@ class BatchedFrequencyPenalizer(_BatchedPenalizer):
         ).unsqueeze_(1)
 
     def _cumulate_output_tokens(self, output_ids: torch.Tensor):
+        output_ids = output_ids.to(self.cumulated_frequency_penalties.device)
+        self.frequency_penalties = self.frequency_penalties.to(
+            self.cumulated_frequency_penalties.device
+        )
         self.cumulated_frequency_penalties.scatter_add_(
             dim=1,
             index=output_ids.unsqueeze(1),
