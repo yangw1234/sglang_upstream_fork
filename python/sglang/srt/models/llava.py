@@ -42,7 +42,7 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaForCausalLM
 from sglang.srt.models.mistral import MistralForCausalLM
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
-from sglang.srt.utils import add_prefix, flatten_nested_list
+from sglang.srt.utils import add_prefix, flatten_nested_list, get_device
 
 
 class LlavaBaseForCausalLM(nn.Module):
@@ -426,14 +426,15 @@ class LlavaBaseForCausalLM(nn.Module):
         # huggingface_name or path_of_clip_relative_to_llava_model_dir
         # We put the initialization here instead of __init__ to allow it being reused by other subclasses.
         vision_path = self.config.mm_vision_tower
+        device = get_device()
         if "clip" in vision_path:
             self.vision_tower = CLIPVisionModel.from_pretrained(
                 vision_path, torch_dtype=torch.float16
-            ).cuda()
+            ).to(device)
         elif "siglip" in vision_path:
             self.vision_tower = SiglipVisionModel.from_pretrained(
                 vision_path, torch_dtype=torch.float16
-            ).cuda()
+            ).to(device)
             # Siglip needs all feature tokens
             self.config.mm_vision_select_feature = "full"
         self.vision_tower.eval()
