@@ -853,6 +853,7 @@ class ProfileReq:
     with_stack: Optional[bool] = None
     record_shapes: Optional[bool] = None
     profile_id: Optional[str] = None
+    profile_rank_list: Optional[List[int]] = None
 
 
 @dataclass

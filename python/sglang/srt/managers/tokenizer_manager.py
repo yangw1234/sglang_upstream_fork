@@ -734,6 +734,7 @@ class TokenizerManager:
         output_dir: Optional[str] = None,
         num_steps: Optional[int] = None,
         activities: Optional[List[str]] = None,
+        profile_rank_list: Optional[List[int]] = None,
     ):
         req = ProfileReq(
             type=ProfileReqType.START_PROFILE,
@@ -741,6 +742,7 @@ class TokenizerManager:
             num_steps=num_steps,
             activities=activities,
             profile_id=str(time.time()),
+            profile_rank_list=profile_rank_list,
         )
         result = (await self.start_profile_communicator(req))[0]
         if not result.success:

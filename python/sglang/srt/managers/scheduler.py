@@ -196,6 +196,8 @@ class Scheduler(
         self.page_size = server_args.page_size
 
         # Distributed rank info
+        # Default profile all ranks
+        self.profile_rank_list = None
         self.dp_size = server_args.dp_size
         self.attn_tp_rank, self.attn_tp_size, self.dp_rank = (
             compute_dp_attention_world_info(
@@ -1829,6 +1831,7 @@ class Scheduler(
                 recv_req.with_stack,
                 recv_req.record_shapes,
                 recv_req.profile_id,
+                recv_req.profile_rank_list,
             )
         else:
             return self.stop_profile()
@@ -1841,7 +1844,14 @@ class Scheduler(
         with_stack: Optional[bool],
         record_shapes: Optional[bool],
         profile_id: Optional[str],
+        profile_rank_list: Optional[List[int]] = None,
     ) -> None:
+
+        self.profile_rank_list = profile_rank_list
+        if self.profile_rank_list and self.tp_rank not in self.profile_rank_list:
+            return
+        logger.info("Start Profile only rank %d", self.tp_rank)
+
         if self.profiler_activities:
             return ProfileReqOutput(
                 success=False,
@@ -1894,6 +1904,11 @@ class Scheduler(
             return ProfileReqOutput(success=True, message="Succeeded")
 
     def stop_profile(self) -> None:
+
+        if self.profile_rank_list and self.tp_rank not in self.profile_rank_list:
+            return
+        logger.info("Stop Profile only rank %d", self.tp_rank)
+
         if self.profiler_activities is None:
             return
 

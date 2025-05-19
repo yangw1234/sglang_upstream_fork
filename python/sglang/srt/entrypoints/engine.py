@@ -286,10 +286,22 @@ class Engine(EngineBase):
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(self.tokenizer_manager.flush_cache())
 
-    def start_profile(self):
+    def start_profile(
+        self,
+        activities: Optional[List[str]] = None,
+        num_steps: Optional[int] = None,
+        profile_rank_list: Optional[List[int]] = None,
+    ):
+        if activities is None:
+            activities = ["CPU", "GPU"]
         loop = asyncio.get_event_loop()
+
         loop.run_until_complete(
-            self.tokenizer_manager.start_profile(activities=activities)
+            self.tokenizer_manager.start_profile(
+                activities=activities,
+                num_steps=num_steps,
+                profile_rank_list=profile_rank_list,
+            )
         )
 
     def stop_profile(self):
