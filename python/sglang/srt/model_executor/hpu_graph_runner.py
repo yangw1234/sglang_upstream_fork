@@ -43,6 +43,7 @@ if _is_hpu:
     os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "true"
 
     from sglang.srt.hpu_utils import (
+        PREFILL_BUCKET_STEP,
         SKIP_WARMUP,
         USE_CONTIGUOUS_PA,
         compute_hpu_attn_bias_decode,
@@ -55,7 +56,6 @@ if _is_hpu:
         get_prefill_seq_len_bucket,
         prepare_hpu_attn_bias_prefill,
         to_hpu_and_pad_1d,
-        PREFILL_BUCKET_STEP
     )
 
 if TYPE_CHECKING:
