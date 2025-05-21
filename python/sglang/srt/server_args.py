@@ -256,7 +256,8 @@ class ServerArgs:
             else:
                 self.chunked_prefill_size = 8192
 
-        assert self.chunked_prefill_size % self.page_size == 0
+        if self.chunked_prefill_size != -1:
+            assert self.chunked_prefill_size % self.page_size == 0
 
         if self.enable_flashmla is True:
             logger.warning(
