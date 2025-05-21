@@ -29,7 +29,7 @@ from sglang.srt.utils import get_bool_env_var, get_int_env_var, is_hpu
 class HPUBlockMetadata:
     """HPU-specific metadata for paged attention."""
 
-    use_contiguous_pa: Optional[bool] = None
+    use_contiguous_pa: Optional[bool] = False
     block_list: Optional[torch.Tensor] = None
     block_mapping: Optional[torch.Tensor] = None
     block_groups: Optional[torch.Tensor] = None
@@ -146,7 +146,7 @@ if _is_hpu:
         )
 
     def get_prefill_all_prefix_seq_len_buckets():
-        return list(
+        return [0] + list(
             range(
                 PREFILL_PREFIX_BUCKET_MIN,
                 PREFILL_PREFIX_BUCKET_MAX + 1,

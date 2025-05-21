@@ -55,6 +55,7 @@ if _is_hpu:
         get_prefill_seq_len_bucket,
         prepare_hpu_attn_bias_prefill,
         to_hpu_and_pad_1d,
+        PREFILL_BUCKET_STEP
     )
 
 if TYPE_CHECKING:
@@ -152,7 +153,7 @@ def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRun
         block_groups = None
         block_usage = None
         use_contiguous_pa = (
-            None
+            False
             if forward_batch.hpu_metadata is None
             else forward_batch.hpu_metadata.use_contiguous_pa
         )
@@ -243,7 +244,7 @@ def create_hpu_dummy_batch_prefill(
         block_usage=None,
         attn_backend=attn_backend,
         token_to_kv_pool=token_to_kv_pool,
-        use_contiguous_pa=None,
+        use_contiguous_pa=False,
     )
 
 
@@ -382,13 +383,15 @@ class HPUGraphRunner:
         time_start = time.perf_counter()
         max_prefill_tokens = self.model_runner.server_args.max_prefill_tokens
         prefill_seq_len_buckets = get_prefill_all_seq_len_buckets()
+        prefill_step = PREFILL_BUCKET_STEP
         if self.model_runner.server_args.disable_radix_cache:
             prefill_prefix_len_buckets = [0]
         else:
             prefill_prefix_len_buckets = get_prefill_all_prefix_seq_len_buckets()
         for prompt_len in prefill_seq_len_buckets:
             for prefix_len in prefill_prefix_len_buckets:
-                if prefix_len + prompt_len > max_prefill_tokens:
+                # add some head room
+                if prefix_len + prompt_len > max_prefill_tokens + prefill_step:
                     continue
                 self.capture_prefill(prefix_len, prompt_len)
         time_end = time.perf_counter()
