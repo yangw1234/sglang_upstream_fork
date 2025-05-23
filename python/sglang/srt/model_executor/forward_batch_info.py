@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import torch
 import triton
@@ -62,7 +62,7 @@ class ForwardMode(IntEnum):
     DECODE = auto()
     # Contains both EXTEND and DECODE when doing chunked prefill.
     MIXED = auto()
-    # No sequence to forward. For data parallel attention, some workers wil be IDLE if no sequence are allocated.
+    # No sequence to forward. For data parallel attention, some workers will be IDLE if no sequence are allocated.
     IDLE = auto()
 
     # Used in speculative decoding: verify a batch in the target model.
@@ -598,127 +598,35 @@ class ForwardBatch:
         # Precompute the kv indices for each chunk
         self.prepare_chunked_kv_indices(device)
 
-    def get_max_chunk_capacity(self):
-        # Maximum number of tokens in each chunk
-        # TODO: Should be changed to a better value, maybe passed through server args
-        return 128 * 1024
 
-    def set_prefix_chunk_idx(self, idx: int):
-        self.prefix_chunk_idx = idx
+class PPProxyTensors:
+    # adapted from https://github.com/vllm-project/vllm/blob/d14e98d924724b284dc5eaf8070d935e214e50c0/vllm/sequence.py#L1103
+    tensors: Dict[str, torch.Tensor]
 
-    def set_attn_attend_prefix_cache(self, attn_attend_prefix_cache: bool):
-        self.attn_attend_prefix_cache = attn_attend_prefix_cache
+    def __init__(self, tensors):
+        # manually define this function, so that
+        # Dynamo knows `IntermediateTensors()` comes from this file.
+        # Otherwise, dataclass will generate this function by evaluating
+        # a string, and we will lose the information about the source file.
+        self.tensors = tensors
 
-    def prepare_chunked_kv_indices(self, device: torch.device):
-        self.prefix_chunk_kv_indices = []
-        for idx in range(self.num_prefix_chunks):
-            chunk_starts = self.prefix_chunk_starts[idx]
-            chunk_seq_lens = self.prefix_chunk_seq_lens[idx]
-            chunk_cu_seq_lens = self.prefix_chunk_cu_seq_lens[idx]
-            num_chunk_tokens = self.prefix_chunk_num_tokens[idx]
+    def __getitem__(self, key: Union[str, slice]):
+        if isinstance(key, str):
+            return self.tensors[key]
+        elif isinstance(key, slice):
+            return self.__class__({k: v[key] for k, v in self.tensors.items()})
 
-            chunk_kv_indices = torch.empty(
-                num_chunk_tokens, dtype=torch.int32, device=device
-            )
+    def __setitem__(self, key: str, value: torch.Tensor):
+        self.tensors[key] = value
 
-            create_chunked_prefix_cache_kv_indices[(self.batch_size,)](
-                self.req_to_token_pool.req_to_token,
-                self.req_pool_indices,
-                chunk_starts,
-                chunk_seq_lens,
-                chunk_cu_seq_lens,
-                chunk_kv_indices,
-                self.req_to_token_pool.req_to_token.shape[1],
-            )
-            self.prefix_chunk_kv_indices.append(chunk_kv_indices)
+    def __len__(self):
+        return len(self.tensors)
 
-    # Here we suppose the length of each chunk is equal
-    # For example, if we have 4 sequences with prefix length [256, 512, 768, 1024], prefix_chunk_len = 256
-    # num_prefix_chunks = cdiv(1024, 256) = 4
-    # prefix_chunk_starts = [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512], [768, 768, 768, 768]]
-    # prefix_chunk_ends = [[256, 256, 256, 256], [256, 512, 512, 512], [256, 512, 768, 768], [256, 512, 768, 1024]]
-    # prefix_chunk_seq_lens = [[256, 256, 256, 256], [0, 256, 256, 256], [0, 0, 256, 256], [0, 0, 0, 256]]
-    # TODO: Implement a better way to allocate chunk lengths that uses memory spaces more efficiently.
-    def get_prefix_chunk_seq_lens(
-        self, prefix_lens: torch.Tensor, num_prefix_chunks: int, prefix_chunk_len: int
-    ):
-        device = prefix_lens.device
-        prefix_chunk_starts = (
-            torch.arange(num_prefix_chunks, device=device, dtype=torch.int32)
-            .unsqueeze(1)
-            .expand(-1, self.batch_size)
-            * prefix_chunk_len
-        )
-        prefix_chunk_ends = torch.min(
-            prefix_lens.unsqueeze(0),
-            prefix_chunk_starts + prefix_chunk_len,
-        ).to(torch.int32)
+    def __eq__(self, other: object):
+        return isinstance(other, self.__class__) and self
 
-        prefix_chunk_seq_lens = (
-            (prefix_chunk_ends - prefix_chunk_starts).clamp(min=0).to(torch.int32)
-        )
-
-        return prefix_chunk_starts, prefix_chunk_seq_lens
-
-    # Called before each attention module if using chunked kv cache for prefill
-    # Some of the codes are adapted from https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/common.py
-    def prepare_chunked_prefix_cache_info(self, device: torch.device):
-
-        from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
-
-        assert isinstance(
-            self.token_to_kv_pool, MLATokenToKVPool
-        ), "Currently chunked prefix cache can only be used by Deepseek models"
-
-        if self.prefix_chunk_len is not None:
-            # Chunked kv cache info already prepared by prior modules
-            return
-
-        self.prefix_chunk_idx = -1
-
-        # chunk_capacity is the maximum number of tokens in each chunk
-        chunk_capacity = self.get_max_chunk_capacity()
-        self.prefix_chunk_len = chunk_capacity // self.batch_size
-
-        self.num_prefix_chunks = (
-            max(self.extend_prefix_lens_cpu) + self.prefix_chunk_len - 1
-        ) // self.prefix_chunk_len
-
-        # Here we compute chunk lens twice to avoid stream sync, once on gpu and once on cpu.
-        prefix_chunk_starts_cuda, prefix_chunk_seq_lens_cuda = (
-            self.get_prefix_chunk_seq_lens(
-                self.extend_prefix_lens,
-                self.num_prefix_chunks,
-                self.prefix_chunk_len,
-            )
-        )
-        _, prefix_chunk_seq_lens_cpu = self.get_prefix_chunk_seq_lens(
-            torch.tensor(self.extend_prefix_lens_cpu),
-            self.num_prefix_chunks,
-            self.prefix_chunk_len,
-        )
-        self.prefix_chunk_starts = prefix_chunk_starts_cuda
-        self.prefix_chunk_seq_lens = prefix_chunk_seq_lens_cuda
-
-        # Metadata for attention backend
-        self.prefix_chunk_cu_seq_lens = torch.zeros(
-            self.num_prefix_chunks,
-            self.batch_size + 1,
-            device=device,
-            dtype=torch.int32,
-        )
-        self.prefix_chunk_cu_seq_lens[:, 1:] = prefix_chunk_seq_lens_cuda.cumsum(
-            dim=1
-        ).to(torch.int32)
-        self.prefix_chunk_max_seq_lens = prefix_chunk_seq_lens_cpu.max(
-            dim=1
-        ).values.tolist()
-
-        self.prefix_chunk_num_tokens = prefix_chunk_seq_lens_cpu.sum(dim=1).tolist()
-        assert max(self.prefix_chunk_num_tokens) <= self.get_max_chunk_capacity()
-
-        # Precompute the kv indices for each chunk
-        self.prepare_chunked_kv_indices(device)
+    def __repr__(self) -> str:
+        return f"PPProxyTensors(tensors={self.tensors})"
 
 
 def compute_position_triton(

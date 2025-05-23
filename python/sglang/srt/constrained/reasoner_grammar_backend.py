@@ -36,6 +36,13 @@ class ReasonerGrammarObject(BaseGrammarObject):
     def finished(self, finished):
         self.grammar.finished = finished
 
+    def accept_token(self, token: int):
+        if token == self.think_end_id:
+            self.is_in_reasoning = False
+
+        if not self.is_in_reasoning and token != self.think_end_id:
+            self.grammar.accept_token(token)
+
     def allocate_vocab_mask(
         self, vocab_size: int, batch_size: int, device
     ) -> torch.Tensor:
@@ -59,6 +66,17 @@ class ReasonerGrammarObject(BaseGrammarObject):
         if not self.is_in_reasoning and token != self.think_end_id:
             self.grammar.accept_token(token)
 
+    def copy(self) -> BaseGrammarObject:
+        return ReasonerGrammarObject(self.grammar.copy(), self.think_end_id)
+
+    @property
+    def finished(self):
+        return self.grammar.finished
+
+    @finished.setter
+    def finished(self, finished):
+        self.grammar.finished = finished
+
     def try_jump_forward(self, tokenizer):
         return self.grammar.try_jump_forward(tokenizer)
 
@@ -80,6 +98,14 @@ class ReasonerGrammarBackend(BaseGrammarBackend):
     def __init__(self, grammar_backend: BaseGrammarBackend, think_end_id):
         self.grammar_backend = grammar_backend
         self.think_end_id = think_end_id
+
+    def _init_value_dispatch(
+        self, key: Tuple[str, str]
+    ) -> Optional[ReasonerGrammarObject]:
+        ret = self.grammar_backend._init_value_dispatch(key)
+        if ret is None:
+            return None
+        return ReasonerGrammarObject(ret, self.think_end_id)
 
     def get_cached_value(self, key: Tuple[str, str]) -> Optional[ReasonerGrammarObject]:
         grammar = self.grammar_backend.get_cached_value(key)

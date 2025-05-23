@@ -5,7 +5,7 @@
 show_help() {
   echo "Usage: $0 [--enable-torch-compile] [--model-size 8b|70b] [--batch-size N --input-len N --output-len N]"
   echo "Options:"
-  echo "  --enable-torch-compile   Enable compilation optimizations with torch.compile otheriwse lazy mode is used"
+  echo "  --enable-torch-compile   Enable compilation optimizations with torch.compile otherwise lazy mode is used"
   echo "  --model-size 8b|70b      Specify the model size (8B or 70B) default is 8B"
   echo "  --batch-size N           Set the batch size for your benchmark"
   echo "  --input-len N            Set the input sequence length for your benchmark"

@@ -104,6 +104,21 @@ class GuidanceGrammar(BaseGrammarObject):
             serialized_grammar=self.serialized_grammar,
         )
 
+    def try_jump_forward(self, tokenizer) -> Optional[Tuple[List[int], str]]:
+        ff_tokens = self.ll_matcher.compute_ff_tokens()
+        if ff_tokens:
+            return ff_tokens, ""
+        else:
+            return None
+
+    def jump_forward_str_state(self, helper: Tuple[List[int], str]) -> Tuple[str, int]:
+        return "", -1
+
+    def jump_and_retokenize(
+        self, old_output_ids: List[int], new_output_ids: List[int], next_state: int
+    ):
+        pass
+
 
 class GuidanceBackend(BaseGrammarBackend):
 
@@ -130,12 +145,16 @@ class GuidanceBackend(BaseGrammarBackend):
             return None
 
     def dispatch_json(self, key_string: str) -> Optional[GuidanceGrammar]:
-        serialized_grammar = LLMatcher.grammar_from_json_schema(
-            key_string,
-            defaults={
-                "whitespace_pattern": self.whitespace_pattern,
-            },
-        )
+        try:
+            serialized_grammar = LLMatcher.grammar_from_json_schema(
+                key_string,
+                defaults={
+                    "whitespace_pattern": self.whitespace_pattern,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Skip invalid grammar: {key_string=}, {e=}")
+            return None
         return self._from_serialized(serialized_grammar)
 
     def dispatch_regex(self, key_string: str) -> Optional[GuidanceGrammar]:

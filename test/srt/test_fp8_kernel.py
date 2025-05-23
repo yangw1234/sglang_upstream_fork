@@ -93,11 +93,7 @@ class TestPerTokenGroupQuantFP8(TestFP8Base):
         if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 9:
             return
         A, A_quant_gt, scale_gt = self._make_A(
-            M=self.M,
-            K=self.K,
-            group_size=self.group_size,
-            out_dtype=self.quant_type,
-            device=self.device,
+            M=self.M, K=self.K, group_size=self.group_size, out_dtype=self.quant_type
         )
         A_quant, scale = per_token_group_quant_fp8(x=A, group_size=self.group_size)
         torch.testing.assert_close(scale, scale_gt)

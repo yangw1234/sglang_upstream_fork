@@ -144,7 +144,6 @@ def load_model(server_args, port_args, tp_rank):
         context_length=server_args.context_length,
         model_override_args=server_args.json_model_override_args,
         is_embedding=server_args.is_embedding,
-        enable_multimodal=server_args.enable_multimodal,
         dtype=server_args.dtype,
         quantization=server_args.quantization,
     )
@@ -154,6 +153,8 @@ def load_model(server_args, port_args, tp_rank):
         gpu_id=tp_rank,
         tp_rank=tp_rank,
         tp_size=server_args.tp_size,
+        pp_rank=0,
+        pp_size=1,
         nccl_port=port_args.nccl_port,
         server_args=server_args,
     )
@@ -254,7 +255,7 @@ def extend(reqs, model_runner):
     _maybe_prepare_dp_attn_batch(batch, model_runner)
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
-    logits_output = model_runner.forward(forward_batch)
+    logits_output, _ = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits, batch
 
@@ -266,7 +267,7 @@ def decode(input_token_ids, batch, model_runner):
     _maybe_prepare_dp_attn_batch(batch, model_runner)
     model_worker_batch = batch.get_model_worker_batch()
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
-    logits_output = model_runner.forward(forward_batch)
+    logits_output, _ = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
     return next_token_ids, logits_output.next_token_logits
 

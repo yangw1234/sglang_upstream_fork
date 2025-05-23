@@ -47,10 +47,10 @@ class TestReleaseMemoryOccupation(CustomTestCase):
         )
 
         print("release_memory_occupation start")
-        t = time.time()
+        t = time.perf_counter()
         engine.release_memory_occupation()
         if _DEBUG_EXTRA:
-            print("release_memory_occupation", time.time() - t)
+            print("release_memory_occupation", time.perf_counter() - t)
 
         if _DEBUG_EXTRA:
             time.sleep(5)
@@ -65,10 +65,10 @@ class TestReleaseMemoryOccupation(CustomTestCase):
             time.sleep(5)
 
         print("resume_memory_occupation start")
-        t = time.time()
+        t = time.perf_counter()
         engine.resume_memory_occupation()
         if _DEBUG_EXTRA:
-            print("resume_memory_occupation", time.time() - t)
+            print("resume_memory_occupation", time.perf_counter() - t)
 
         self.assertEqual(
             _try_allocate_big_tensor(),
