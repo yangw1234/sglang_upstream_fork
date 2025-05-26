@@ -90,6 +90,14 @@ HPUForwardBatch = namedtuple(
 )
 
 
+def set_hpu_torch_compile_config():
+    import torch._dynamo.config
+
+    torch._dynamo.config.accumulated_cache_size_limit = 8192
+    if hasattr(torch._dynamo.config, "cache_size_limit"):
+        torch._dynamo.config.cache_size_limit = 8192
+
+
 def create_hpu_forward_batch(forward_batch: ForwardBatch, model_runner: ModelRunner):
     assert (
         forward_batch.hpu_metadata is not None
@@ -269,6 +277,7 @@ class HPUGraphRunner:
                 disable_tensor_cache=True,
             )
         elif self.model_runner.server_args.enable_torch_compile:
+            set_hpu_torch_compile_config()
             self.regional_compilation_layers_list = [RMSNorm, VocabParallelEmbedding]
             self.model = HPUAdapter(self.model_runner.model, self.model_runner.dtype)
             self._regional_compilation(self.model)
