@@ -232,7 +232,7 @@ class TpModelWorkerClient:
         )
 
         # A cuda stream sync here to avoid the cuda illegal memory access error.
-        sync_event = torch.get_device_module(self.device).Event()
+        sync_event = torch.get_device_module(self.scheduler_device).Event()
         sync_event.record(self.scheduler_stream)
 
         # Push a new batch to the queue
