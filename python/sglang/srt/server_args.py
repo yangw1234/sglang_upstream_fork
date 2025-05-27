@@ -26,6 +26,7 @@ from sglang.srt.hf_transformers_utils import check_gguf_file, get_config
 from sglang.srt.reasoning_parser import ReasoningParser
 from sglang.srt.utils import (
     configure_ipv6,
+    get_bool_env_var,
     get_device,
     get_device_memory_capacity,
     is_flashinfer_available,
@@ -432,9 +433,13 @@ class ServerArgs:
             self.disable_radix_cache = True
             logger.warning("KV cache is forced as chunk cache for decode server")
 
-        os.environ["SGLANG_ENABLE_TORCH_COMPILE"] = (
-            "1" if self.enable_torch_compile else "0"
-        )
+        if get_bool_env_var("SGLANG_ENABLE_TORCH_COMPILE"):
+            self.enable_torch_compile = True
+            logger.warning("Enabled torch.compile from env variable")
+        else:
+            os.environ["SGLANG_ENABLE_TORCH_COMPILE"] = (
+                "1" if self.enable_torch_compile else "0"
+            )
         # Set env var before grammar backends init
         os.environ["SGLANG_DISABLE_OUTLINES_DISK_CACHE"] = (
             "1" if self.disable_outlines_disk_cache else "0"
