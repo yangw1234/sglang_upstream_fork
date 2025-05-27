@@ -185,10 +185,7 @@ class TpModelWorkerClient:
                     "cpu", non_blocking=True
                 )
 
-            # non_blocking made False as a workaround for HPU issue in eager:
-            # OverflowError: out of range integral type conversion attempted
-            # To be reverted once SW-223830 is resolved
-            next_token_ids = next_token_ids.to("cpu", non_blocking=False)
+            next_token_ids = next_token_ids.to("cpu", non_blocking=True)
             copy_done.record()
 
             self.output_queue.put(
