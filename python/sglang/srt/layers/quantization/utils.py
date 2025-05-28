@@ -58,9 +58,31 @@ def is_layer_skipped(
 def per_tensor_dequantize(
     tensor: torch.Tensor, inv_scale: Union[float, torch.Tensor]
 ) -> torch.Tensor:
-    fake_qweight = tensor.to(torch.bfloat16)
-    dq_weight = fake_qweight * inv_scale
-    return dq_weight
+    # HPU-specific handling for proper dequantization
+    if _is_hpu:
+        dtype = torch.bfloat16
+        device = tensor.device
+        
+        # Check if we're on Gaudi2 and need CPU dequantization to avoid NaN
+        try:
+            import habana_frameworks.torch.core as htcore
+            import habana_frameworks.torch.hpu as hthpu
+            import habana_frameworks.torch.utils.experimental as htexp
+            
+            if htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:
+                # Dequant on CPU to avoid NaN on Gaudi2
+                tensor = tensor.to('cpu')
+        except ImportError:
+            pass
+        
+        fake_qweight = tensor.to(dtype).to(device)
+        dq_weight = fake_qweight * inv_scale
+        return dq_weight
+    else:
+        # Original CUDA/CPU implementation
+        fake_qweight = tensor.to(torch.bfloat16)
+        dq_weight = fake_qweight * inv_scale
+        return dq_weight
 
 
 def all_close_1d(x: torch.Tensor) -> bool:
@@ -96,6 +118,14 @@ def requantize_with_max_scale(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
+    
+    # HPU-specific scale conversion
+    if _is_hpu:
+        try:
+            from vllm_hpu_extension.scales import ConvertScaleToHwAligned
+            max_w_scale = ConvertScaleToHwAligned().calc(max_w_scale)
+        except ImportError:
+            pass
 
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize

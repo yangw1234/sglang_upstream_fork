@@ -12,6 +12,16 @@ try:
 except ImportError:
     VLLM_AVAILABLE = False
 
+# HPU-specific ops override to handle different function signatures
+from sglang.srt.utils import is_hpu
+_is_hpu = is_hpu()
+if _is_hpu:
+    try:
+        from vllm_hpu_extension.ops import scaled_fp8_quant
+        ops.scaled_fp8_quant = scaled_fp8_quant
+    except ImportError:
+        pass
+
 from sglang.srt.layers.quantization.deep_gemm import _ENABLE_JIT_DEEPGEMM
 from sglang.srt.layers.quantization.fp8_kernel import (
     fp8_dtype,

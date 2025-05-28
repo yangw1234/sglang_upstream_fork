@@ -21,6 +21,15 @@ from sglang.srt.layers.quantization.fp8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
 )
 from sglang.srt.layers.quantization.utils import requantize_with_max_scale
+from sglang.srt.utils import is_hpu
+
+# HPU-specific imports for proper FP8 handling
+_is_hpu = is_hpu()
+if _is_hpu:
+    try:
+        from vllm_hpu_extension.scales import ConvertScaleToHwAligned
+    except ImportError:
+        ConvertScaleToHwAligned = None
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -83,9 +92,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")
 
-        # INPUT SCALE
+        # INPUT SCALE - HPU-specific handling
         if self.is_static_input_scheme and hasattr(layer, "input_scale"):
-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+            input_scale = layer.input_scale.max()
+            # Apply HPU-specific scale conversion if available
+            if _is_hpu and ConvertScaleToHwAligned is not None:
+                input_scale = ConvertScaleToHwAligned().calc(input_scale)
+            layer.input_scale = Parameter(input_scale, requires_grad=False)
         else:
             layer.input_scale = None
 
