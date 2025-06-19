@@ -13,7 +13,7 @@ apply_rotary_emb = None
 
 def is_hopper():
     #  Only Hopper supports different V headdim
-    return torch.cuda.get_device_properties(0).major >= 9
+    return torch.cuda.get_device_properties(0).major == 9
 
 
 def is_fa3_supported(device=None) -> bool:
@@ -24,7 +24,7 @@ def is_fa3_supported(device=None) -> bool:
     #  Between sm80/sm87 and sm86/sm89 is the shared memory size. you can follow the link below for more information
     #  https://docs.nvidia.com/cuda/cuda-c-programming-guide/#shared-memory-8-x
     #  And for sgl-kernel right now, we can build fa3 on sm80/sm86/sm89/sm90a.
-    #  Thats mean if you use A100/A*0/L20/L40/L40s/4090 you can use fa3.
+    #  That means if you use A100/A*0/L20/L40/L40s/4090 you can use fa3.
     return (
         torch.cuda.get_device_capability(device)[0] == 9
         or torch.cuda.get_device_capability(device)[0] == 8
@@ -451,7 +451,7 @@ def generate_qkv(
 
 @pytest.mark.skipif(
     not is_fa3_supported(),
-    reason="flash_attn at sgl-kernel is only supported on sm90 and above",
+    reason="flash_attn at sgl-kernel is only supported on sm90 or sm80",
 )
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
@@ -1009,6 +1009,10 @@ def _generate_block_kvcache(
     return k_cache, v_cache, page_table, k_cache_paged, v_cache_paged, num_blocks
 
 
+@pytest.mark.skipif(
+    not is_fa3_supported(),
+    reason="flash_attn at sgl-kernel is only supported on sm90 or sm80",
+)
 # @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16] + ([torch.float8_e4m3fn] if not DISABLE_FP8 else [])

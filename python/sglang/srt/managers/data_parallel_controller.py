@@ -17,13 +17,13 @@ import logging
 import multiprocessing as mp
 import signal
 import threading
+import time
 from enum import Enum, auto
 
 import psutil
 import setproctitle
 import zmq
 
-from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.managers.io_struct import (
     TokenizedEmbeddingReqInput,
@@ -158,7 +158,7 @@ class DataParallelController:
         # This thread cannot be closed because otherwise the `kill_itself_when_parent_died`
         # function in scheduler.py will kill the scheduler.
         while True:
-            pass
+            time.sleep(30 * 24 * 3600)
 
     def launch_dp_attention_schedulers(self, server_args, port_args):
         self.launch_tensor_parallel_group(server_args, port_args, 0, None)
@@ -210,7 +210,7 @@ class DataParallelController:
                     )
                     # compute zmq ports for this dp rank
                     rank_port_args = PortArgs.init_new(server_args, dp_rank)
-                    # Data parallelism resues the tensor parallelism group,
+                    # Data parallelism reuses the tensor parallelism group,
                     # so all dp ranks should use the same nccl port.
                     rank_port_args.nccl_port = port_args.nccl_port
 
@@ -248,12 +248,20 @@ class DataParallelController:
 
     def round_robin_scheduler(self, req: Req):
         if self.server_args.disaggregation_mode == "null":
-            self.workers[self.round_robin_counter].send_pyobj(req)
-            self.round_robin_counter = (self.round_robin_counter + 1) % len(
-                self.workers
-            )
+            if req.data_parallel_rank is not None:
+                logger.debug(f"Direct routing to DP rank {req.data_parallel_rank}")
+                self.workers[req.data_parallel_rank].send_pyobj(req)
+            else:
+                self.workers[self.round_robin_counter].send_pyobj(req)
+                self.round_robin_counter = (self.round_robin_counter + 1) % len(
+                    self.workers
+                )
         else:
-            self.workers[req.bootstrap_room % len(self.workers)].send_pyobj(req)
+            if req.data_parallel_rank is not None:
+                logger.debug(f"Direct routing to DP rank {req.data_parallel_rank}")
+                self.workers[req.data_parallel_rank].send_pyobj(req)
+            else:
+                self.workers[req.bootstrap_room % len(self.workers)].send_pyobj(req)
 
     def shortest_queue_scheduler(self, input_requests):
         raise NotImplementedError()

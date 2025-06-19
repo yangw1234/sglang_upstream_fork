@@ -18,7 +18,7 @@ import logging
 import signal
 import threading
 from queue import Queue
-from typing import Optional
+from typing import Optional, Tuple
 
 import psutil
 import torch
@@ -33,13 +33,15 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import DynamicGradMode, get_compiler_backend
+from sglang.srt.utils import DynamicGradMode, get_compiler_backend, is_hpu
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
 
+_is_hpu = is_hpu()
 
-@torch.compile(dynamic=True, backend=get_compiler_backend())
+
+@torch.compile(dynamic=True, backend=get_compiler_backend(), disable=_is_hpu)
 def resolve_future_token_ids(input_ids, future_token_ids_map):
     input_ids[:] = torch.where(
         input_ids < 0,
@@ -88,6 +90,15 @@ class TpModelWorkerClient:
         if self.device == "cpu":
             self.scheduler_stream.synchronize = lambda: None  # No-op for CPU
 
+        self.hicache_layer_transfer_counter = None
+
+    def register_hicache_layer_transfer_counter(self, counter):
+        self.hicache_layer_transfer_counter = counter
+
+    def set_hicache_consumer(self, consumer_index):
+        if self.hicache_layer_transfer_counter is not None:
+            self.hicache_layer_transfer_counter.set_consumer(consumer_index)
+
     def get_worker_info(self):
         return self.worker.get_worker_info()
 
@@ -127,9 +138,11 @@ class TpModelWorkerClient:
         batch_lists = [None] * 2
 
         while True:
-            model_worker_batch, future_token_ids_ct = self.input_queue.get()
+            model_worker_batch, future_token_ids_ct, sync_event = self.input_queue.get()
             if not model_worker_batch:
                 break
+
+            sync_event.wait()
 
             # Keep a reference of model_worker_batch by storing it into a list.
             # Otherwise, the tensor members of model_worker_batch will be released
@@ -144,9 +157,13 @@ class TpModelWorkerClient:
             input_ids = model_worker_batch.input_ids
             resolve_future_token_ids(input_ids, self.future_token_ids_map)
 
+            # update the consumer index of hicache to the running batch
+            self.set_hicache_consumer(model_worker_batch.hicache_consumer_index)
             # Run forward
-            logits_output, next_token_ids = self.worker.forward_batch_generation(
-                model_worker_batch
+            logits_output, next_token_ids, can_run_cuda_graph = (
+                self.worker.forward_batch_generation(
+                    model_worker_batch, model_worker_batch.launch_done
+                )
             )
 
             # Update the future token ids map
@@ -171,14 +188,18 @@ class TpModelWorkerClient:
             next_token_ids = next_token_ids.to("cpu", non_blocking=True)
             copy_done.record()
 
-            self.output_queue.put((copy_done, logits_output, next_token_ids))
+            self.output_queue.put(
+                (copy_done, logits_output, next_token_ids, can_run_cuda_graph)
+            )
 
     def resolve_last_batch_result(self, launch_done: Optional[threading.Event] = None):
         """
         This function is called to resolve the last batch result and
         wait for the current batch to be launched. Used in overlap mode.
         """
-        copy_done, logits_output, next_token_ids = self.output_queue.get()
+        copy_done, logits_output, next_token_ids, can_run_cuda_graph = (
+            self.output_queue.get()
+        )
 
         if launch_done is not None:
             launch_done.wait()
@@ -193,9 +214,11 @@ class TpModelWorkerClient:
                     logits_output.input_token_logprobs.tolist()
                 )
         next_token_ids = next_token_ids.tolist()
-        return logits_output, next_token_ids
+        return logits_output, next_token_ids, can_run_cuda_graph
 
-    def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch):
+    def forward_batch_generation(
+        self, model_worker_batch: ModelWorkerBatch
+    ) -> Tuple[None, torch.Tensor, bool]:
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info
         sampling_info.update_penalties()
@@ -206,10 +229,11 @@ class TpModelWorkerClient:
         )
 
         # A cuda stream sync here to avoid the cuda illegal memory access error.
-        self.scheduler_stream.synchronize()
+        sync_event = torch.get_device_module(self.device).Event()
+        sync_event.record(self.scheduler_stream)
 
         # Push a new batch to the queue
-        self.input_queue.put((model_worker_batch, self.future_token_ids_ct))
+        self.input_queue.put((model_worker_batch, self.future_token_ids_ct, sync_event))
 
         # Allocate output future objects
         bs = len(model_worker_batch.seq_lens)
@@ -223,7 +247,7 @@ class TpModelWorkerClient:
         self.future_token_ids_ct = (
             self.future_token_ids_ct + bs
         ) % self.future_token_ids_limit
-        return None, future_next_token_ids
+        return None, future_next_token_ids, False
 
     def update_weights_from_disk(self, recv_req: UpdateWeightFromDiskReqInput):
         success, message = self.worker.update_weights_from_disk(recv_req)

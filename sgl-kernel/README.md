@@ -62,7 +62,7 @@ CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) python -m uv build --wheel -Cbuild-dir=build
 
 ## Development Environment Setup
 
-Use Docker to set up the development environment. See [Docker setup guide](https://github.com/sgl-project/sglang/blob/main/docs/developer/development_guide_using_docker.md#setup-docker-container).
+Use Docker to set up the development environment. See [Docker setup guide](https://github.com/sgl-project/sglang/blob/main/docs/references/development_guide_using_docker.md#setup-docker-container).
 
 Create and enter development container:
 ```bash
@@ -87,7 +87,7 @@ Third-party libraries:
 
   The main different Between sm80/sm87 and sm86/sm89 is the shared memory size. you can follow the link below for more information https://docs.nvidia.com/cuda/cuda-c-programming-guide/#shared-memory-8-x.
 
-  And for sgl-kernel right now, we can build fa3 on sm80/sm86/sm89/sm90a. Thats mean if you use **A100(tested)**/A*0/**L20(tested)**/L40/L40s/**3090(tested)** you can use fa3.
+  And for sgl-kernel right now, we can build fa3 on sm80/sm86/sm89/sm90a. That means if you use **A100(tested)**/A*0/**L20(tested)**/L40/L40s/**3090(tested)** you can use fa3.
 
 ### Kernel Development
 
