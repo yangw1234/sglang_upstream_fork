@@ -49,7 +49,6 @@ ASSISTANT_SUFFIX = "Assistant:"
 
 global args
 
-
 # don't want to import sglang package here
 def _get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
@@ -68,6 +67,14 @@ def _create_bench_client_session():
         timeout=aiohttp_timeout, read_bufsize=BENCH_AIOHTTP_READ_BUFSIZE_BYTES
     )
 
+# init torch distibuted process group on cpu for torchrun
+import torch
+import torch.distributed as dist
+if not torch.distributed.is_initialized():
+    dist.init_process_group(
+        backend="gloo",
+        init_method="env://",
+    )
 
 @dataclass
 class RequestFuncInput:
@@ -80,7 +87,6 @@ class RequestFuncInput:
     image_data: Optional[List[str]]
     extra_request_body: Dict[str, Any]
     timestamp: Optional[float] = None
-
 
 @dataclass
 class RequestFuncOutput:
@@ -736,6 +742,27 @@ def get_processor(
     )
 
 
+def get_sharegpt_dataset():
+    dataset_path = download_and_cache_file(SHAREGPT_URL)
+    with open(dataset_path) as f:
+        dataset = json.load(f)
+    
+    dataset = [
+        data
+        for data in dataset
+        if len(data.get("conversations", data.get("conversation", []))) >= 2
+    ]
+    # Only keep the first two turns of each conversation.
+    dataset = [
+        (
+            data.get("conversations", data.get("conversation", []))[0]["value"],
+            data.get("conversations", data.get("conversation", []))[1]["value"],
+        )
+        for data in dataset
+    ]
+    return dataset
+
+
 def get_dataset(args, tokenizer, model_id=None):
     tokenize_prompt = getattr(args, "tokenize_prompt", False)
     if args.dataset_name == "sharegpt":
@@ -812,6 +839,45 @@ def get_dataset(args, tokenizer, model_id=None):
 
         # Limit the number of requests based on --num-prompts
         input_requests = all_requests_data[: args.num_prompts]
+    elif args.dataset_name == "novita":
+        import pandas as pd
+        # load csv file into dataframe
+        start_time_stamp = "2025-04-06 00:00:00.000000"
+        end_time_stamp = "2025-04-06 00:00:03.000000"
+        from pandas import read_csv
+        data_path = args.dataset_path
+        df = read_csv(data_path)
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format='ISO8601')
+        start_time = pd.to_datetime(start_time_stamp)
+        end_time = pd.to_datetime(end_time_stamp)
+        df = df[(df["Timestamp"] >= start_time) & (df["Timestamp"] <= end_time)]
+        # convert to list of dict
+        input_requests = df.to_dict(orient="records")
+        input_requests.sort(key=lambda r: r["Timestamp"])
+        dataset = get_sharegpt_dataset()
+
+        for i, record in enumerate(input_requests):
+            prompt_len = record.get("Prompt Len", 2048)
+            output_len = record.get("Output Len", 256)
+            prompt_len = min(prompt_len, 16384)  # Cap to 16384 for safety
+            prompt = None
+            j = i
+            while prompt is None:
+                sample = dataset[j]
+                _prompt = sample[0]
+                _prompt_token_ids = tokenizer.encode(_prompt)
+                _prompt_len = len(_prompt_token_ids)
+                if _prompt_len < prompt_len:
+                    j = (j + 1) % len(dataset)
+                    continue
+
+                prompt_token_ids = _prompt_token_ids[:prompt_len]
+                prompt = tokenizer.decode(prompt_token_ids)
+            
+            record["prompt"] = prompt
+            record["Prompt Len"] = prompt_len
+            record["Output Len"] = output_len
+
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
     return input_requests
@@ -1017,6 +1083,42 @@ async def get_mooncake_request_over_time(
             # We use a placeholder because we don't know the real response
             placeholder_response = " ".join(["story"] * output_len_per_round)
             chat_history.append({"role": "assistant", "content": placeholder_response})
+
+async def get_novita_request_over_time(
+    input_requests: List[Dict],
+    tokenizer: PreTrainedTokenizerBase,
+    slowdown_factor: float,
+) -> AsyncGenerator[DatasetRow, None]:
+    """
+    An async generator that yields requests based on the timestamps in the Mooncake trace file,
+    with support for multi-round sessions.
+    """
+    if not input_requests:
+        return
+
+    start_time = time.perf_counter()
+    dist.barrier()
+    trace_start_time_ms = input_requests[0]["Timestamp"]
+
+    for i, record in enumerate(input_requests):
+        # Calculate when this entire session should start
+        relative_arrival_time_s = (record["Timestamp"] - trace_start_time_ms).total_seconds()
+        target_arrival_time_s = relative_arrival_time_s * slowdown_factor
+
+        current_elapsed_time_s = time.perf_counter() - start_time
+        sleep_duration_s = target_arrival_time_s - current_elapsed_time_s
+        if sleep_duration_s > 0:
+            await asyncio.sleep(sleep_duration_s)
+        
+        prompt_len = record["Prompt Len"]
+        output_len = record["Output Len"]
+        prompt = record["prompt"]
+
+        yield DatasetRow(
+                prompt=prompt,
+                prompt_len=prompt_len,
+                output_len=output_len,
+            )
 
 
 def sample_mmmu_requests(
@@ -1780,7 +1882,7 @@ async def benchmark(
     flush_cache: bool = False,
     warmup_requests: int = 1,
     use_trace_timestamps: bool = False,
-    mooncake_slowdown_factor=1.0,
+    slowdown_factor=1.0,
     mooncake_num_rounds=1,
     profile_prefill_url: Optional[List[str]] = None,
     profile_decode_url: Optional[List[str]] = None,
@@ -1825,6 +1927,13 @@ async def benchmark(
             prompt_len=prompt_len,
             output_len=output_len,
             image_data=None,  # Mooncake doesn't have image data
+        )
+    elif args.dataset_name == "novita":
+        # For novita, input_requests is a list of NovitaDatasetRow objects.
+        test_request = DatasetRow(
+            prompt="Can you tell me a detailed story in 1000 words?",
+            prompt_len=input_requests[0]["Prompt Len"],
+            output_len=input_requests[0]["Output Len"],
         )
     else:
         # For all other datasets, input_requests is a list of DatasetRow objects
@@ -1905,12 +2014,16 @@ async def benchmark(
     ):  # Assuming mooncake is mainly for sglang or similar backends
         print("Using time-based Mooncake request scheduler, ignoring --request-rate.")
         request_generator = get_mooncake_request_over_time(
-            input_requests, tokenizer, mooncake_slowdown_factor, mooncake_num_rounds
+            input_requests, tokenizer, slowdown_factor, mooncake_num_rounds
         )
         print(
             f"Starting Mooncake trace replay. Sessions: {len(input_requests)}, Rounds per session: {mooncake_num_rounds}. Slowdown factor: {mooncake_slowdown_factor}"
         )
         pbar_total *= args.mooncake_num_rounds
+    elif args.dataset_name == "novita":
+        print("Using time-based Novita request scheduler, ignoring --request-rate.")
+        request_generator = get_novita_request_over_time(
+            input_requests, tokenizer, slowdown_factor=slowdown_factor)
     else:
         request_generator = get_request(input_requests, request_rate)
 
@@ -1925,6 +2038,7 @@ async def benchmark(
         lora_probs = None
 
     pbar = None if disable_tqdm else tqdm(total=pbar_total)
+    input_requests = []
     async for request in request_generator:
         if lora_names is not None and len(lora_names) != 0:
             if lora_request_distribution == "uniform":
@@ -1958,6 +2072,7 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input, pbar=pbar)
             )
         )
+        input_requests.append(request)
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     # Stop profiler
@@ -2389,7 +2504,7 @@ def run_benchmark(args_: argparse.Namespace):
             flush_cache=args.flush_cache,
             warmup_requests=args.warmup_requests,
             use_trace_timestamps=args.use_trace_timestamps,
-            mooncake_slowdown_factor=args.mooncake_slowdown_factor,
+            slowdown_factor=args.slowdown_factor,
             mooncake_num_rounds=args.mooncake_num_rounds,
             profile_prefill_url=getattr(args, "profile_prefill_url", None),
             profile_decode_url=getattr(args, "profile_decode_url", None),
@@ -2450,6 +2565,7 @@ if __name__ == "__main__":
             "mmmu",
             "image",
             "mooncake",
+            "novita"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -2726,7 +2842,7 @@ if __name__ == "__main__":
     )
     mooncake_group = parser.add_argument_group("mooncake dataset arguments")
     mooncake_group.add_argument(
-        "--mooncake-slowdown-factor",
+        "--slowdown-factor",
         type=float,
         default=1.0,
         help="Slowdown factor for replaying the mooncake trace. "
@@ -2752,6 +2868,7 @@ if __name__ == "__main__":
         ],
         help="Underlying workload for the mooncake dataset.",
     )
+
     parser.add_argument(
         "--tag", type=str, default=None, help="The tag to be dumped to output."
     )
