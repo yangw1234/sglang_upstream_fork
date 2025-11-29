@@ -840,10 +840,11 @@ def get_dataset(args, tokenizer, model_id=None):
         # Limit the number of requests based on --num-prompts
         input_requests = all_requests_data[: args.num_prompts]
     elif args.dataset_name == "novita":
+        print("Loading Novita dataset...")
         import pandas as pd
         # load csv file into dataframe
-        start_time_stamp = "2025-04-06 00:00:00.000000"
-        end_time_stamp = "2025-04-06 00:00:03.000000"
+        start_time_stamp = args.start_time_stamp
+        end_time_stamp = args.end_time_stamp
         from pandas import read_csv
         data_path = args.dataset_path
         df = read_csv(data_path)
@@ -855,8 +856,9 @@ def get_dataset(args, tokenizer, model_id=None):
         input_requests = df.to_dict(orient="records")
         input_requests.sort(key=lambda r: r["Timestamp"])
         dataset = get_sharegpt_dataset()
+        print("Preparing prompts from Novita dataset...")
 
-        for i, record in enumerate(input_requests):
+        for i, record in tqdm(enumerate(input_requests), total=len(input_requests), desc="Preparing prompts"):
             prompt_len = record.get("Prompt Len", 2048)
             output_len = record.get("Output Len", 256)
             prompt_len = min(prompt_len, 16384)  # Cap to 16384 for safety
@@ -1097,7 +1099,6 @@ async def get_novita_request_over_time(
         return
 
     start_time = time.perf_counter()
-    dist.barrier()
     trace_start_time_ms = input_requests[0]["Timestamp"]
 
     for i, record in enumerate(input_requests):
@@ -2039,6 +2040,8 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=pbar_total)
     input_requests = []
+    dist.barrier()
+    print("All model client synced, starting Novita request generator...")
     async for request in request_generator:
         if lora_names is not None and len(lora_names) != 0:
             if lora_request_distribution == "uniform":
@@ -2867,6 +2870,18 @@ if __name__ == "__main__":
             "toolagent",
         ],
         help="Underlying workload for the mooncake dataset.",
+    )
+    parser.add_argument(
+        "--start-time-stamp",
+        type=str,
+        default="2025-04-06 00:00:00.000000",
+        help="Start time stamp for filtering the mooncake trace.",
+    )
+    parser.add_argument(
+        "--end-time-stamp",
+        type=str,
+        default="2025-04-06 00:00:03.000000",
+        help="End time stamp for filtering the mooncake trace.",
     )
 
     parser.add_argument(
