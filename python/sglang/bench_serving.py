@@ -49,6 +49,7 @@ ASSISTANT_SUFFIX = "Assistant:"
 
 global args
 
+
 # don't want to import sglang package here
 def _get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
@@ -67,14 +68,17 @@ def _create_bench_client_session():
         timeout=aiohttp_timeout, read_bufsize=BENCH_AIOHTTP_READ_BUFSIZE_BYTES
     )
 
+
 # init torch distibuted process group on cpu for torchrun
 import torch
 import torch.distributed as dist
+
 if not torch.distributed.is_initialized():
     dist.init_process_group(
         backend="gloo",
         init_method="env://",
     )
+
 
 @dataclass
 class RequestFuncInput:
@@ -87,6 +91,7 @@ class RequestFuncInput:
     image_data: Optional[List[str]]
     extra_request_body: Dict[str, Any]
     timestamp: Optional[float] = None
+
 
 @dataclass
 class RequestFuncOutput:
@@ -746,7 +751,7 @@ def get_sharegpt_dataset():
     dataset_path = download_and_cache_file(SHAREGPT_URL)
     with open(dataset_path) as f:
         dataset = json.load(f)
-    
+
     dataset = [
         data
         for data in dataset
@@ -842,13 +847,15 @@ def get_dataset(args, tokenizer, model_id=None):
     elif args.dataset_name == "novita":
         print("Loading Novita dataset...")
         import pandas as pd
+
         # load csv file into dataframe
         start_time_stamp = args.start_time_stamp
         end_time_stamp = args.end_time_stamp
         from pandas import read_csv
+
         data_path = args.dataset_path
         df = read_csv(data_path)
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format='ISO8601')
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="ISO8601")
         start_time = pd.to_datetime(start_time_stamp)
         end_time = pd.to_datetime(end_time_stamp)
         df = df[(df["Timestamp"] >= start_time) & (df["Timestamp"] <= end_time)]
@@ -858,24 +865,40 @@ def get_dataset(args, tokenizer, model_id=None):
         dataset = get_sharegpt_dataset()
         print("Preparing prompts from Novita dataset...")
 
-        for i, record in tqdm(enumerate(input_requests), total=len(input_requests), desc="Preparing prompts"):
+        # Pre-tokenize all dataset samples once
+        print("Pre-tokenizing dataset samples...")
+        tokenized_dataset = []
+        for sample in tqdm(dataset, desc="Tokenizing dataset"):
+            prompt_text = sample[0]
+            token_ids = tokenizer.encode(prompt_text)
+            tokenized_dataset.append((prompt_text, token_ids, len(token_ids)))
+
+        # Sort by length for faster lookup
+        tokenized_dataset.sort(key=lambda x: x[2])
+
+        print("Matching prompts to requests...")
+        for i, record in tqdm(
+            enumerate(input_requests),
+            total=len(input_requests),
+            desc="Preparing prompts",
+        ):
             prompt_len = record.get("Prompt Len", 2048)
             output_len = record.get("Output Len", 256)
             prompt_len = min(prompt_len, 16384)  # Cap to 16384 for safety
-            prompt = None
-            j = i
-            while prompt is None:
-                sample = dataset[j]
-                _prompt = sample[0]
-                _prompt_token_ids = tokenizer.encode(_prompt)
-                _prompt_len = len(_prompt_token_ids)
-                if _prompt_len < prompt_len:
-                    j = (j + 1) % len(dataset)
-                    continue
 
-                prompt_token_ids = _prompt_token_ids[:prompt_len]
-                prompt = tokenizer.decode(prompt_token_ids)
-            
+            # Binary search for first sample with sufficient length
+            found = False
+            for prompt_text, token_ids, tok_len in tokenized_dataset:
+                if tok_len >= prompt_len:
+                    prompt = tokenizer.decode(token_ids[:prompt_len])
+                    found = True
+                    break
+
+            # Fallback: use the longest available sample if none is long enough
+            if not found:
+                prompt_text, token_ids, tok_len = tokenized_dataset[-1]
+                prompt = tokenizer.decode(token_ids[: min(prompt_len, tok_len)])
+
             record["prompt"] = prompt
             record["Prompt Len"] = prompt_len
             record["Output Len"] = output_len
@@ -1086,6 +1109,7 @@ async def get_mooncake_request_over_time(
             placeholder_response = " ".join(["story"] * output_len_per_round)
             chat_history.append({"role": "assistant", "content": placeholder_response})
 
+
 async def get_novita_request_over_time(
     input_requests: List[Dict],
     tokenizer: PreTrainedTokenizerBase,
@@ -1103,23 +1127,25 @@ async def get_novita_request_over_time(
 
     for i, record in enumerate(input_requests):
         # Calculate when this entire session should start
-        relative_arrival_time_s = (record["Timestamp"] - trace_start_time_ms).total_seconds()
+        relative_arrival_time_s = (
+            record["Timestamp"] - trace_start_time_ms
+        ).total_seconds()
         target_arrival_time_s = relative_arrival_time_s * slowdown_factor
 
         current_elapsed_time_s = time.perf_counter() - start_time
         sleep_duration_s = target_arrival_time_s - current_elapsed_time_s
         if sleep_duration_s > 0:
             await asyncio.sleep(sleep_duration_s)
-        
+
         prompt_len = record["Prompt Len"]
         output_len = record["Output Len"]
         prompt = record["prompt"]
 
         yield DatasetRow(
-                prompt=prompt,
-                prompt_len=prompt_len,
-                output_len=output_len,
-            )
+            prompt=prompt,
+            prompt_len=prompt_len,
+            output_len=output_len,
+        )
 
 
 def sample_mmmu_requests(
@@ -2024,7 +2050,8 @@ async def benchmark(
     elif args.dataset_name == "novita":
         print("Using time-based Novita request scheduler, ignoring --request-rate.")
         request_generator = get_novita_request_over_time(
-            input_requests, tokenizer, slowdown_factor=slowdown_factor)
+            input_requests, tokenizer, slowdown_factor=slowdown_factor
+        )
     else:
         request_generator = get_request(input_requests, request_rate)
 
@@ -2038,10 +2065,10 @@ async def benchmark(
         lora_idx = None
         lora_probs = None
 
-    pbar = None if disable_tqdm else tqdm(total=pbar_total)
-    input_requests = []
     dist.barrier()
     print("All model client synced, starting Novita request generator...")
+    pbar = None if disable_tqdm else tqdm(total=pbar_total)
+    input_requests = []
     async for request in request_generator:
         if lora_names is not None and len(lora_names) != 0:
             if lora_request_distribution == "uniform":
@@ -2568,7 +2595,7 @@ if __name__ == "__main__":
             "mmmu",
             "image",
             "mooncake",
-            "novita"
+            "novita",
         ],
         help="Name of the dataset to benchmark on.",
     )
