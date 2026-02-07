@@ -17,15 +17,22 @@ ARG SG_LANG_BRANCH=main
 ARG SG_LANG_KERNEL_REPO=https://github.com/sgl-project/sgl-kernel-xpu.git
 ARG SG_LANG_KERNEL_BRANCH=main
 
-RUN useradd -m -d /home/sdp -s /bin/bash sdp && \
-    chown -R sdp:sdp /home/sdp
+# RUN useradd -m -d /home/ -s /bin/bash sdp && \
+#     chown -R sdp:sdp /home/sdp
 
-# Switch to non-root user 'sdp'
-USER sdp
+# Switch to non-root user 'ubuntu'
+USER root
 
 # Set HOME and WORKDIR to user's home directory
-ENV HOME=/home/sdp
-WORKDIR /home/sdp
+ENV HOME=/root
+WORKDIR /root
+
+RUN apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics && \
+    apt-get install -y libze-intel-gpu1 libze1 intel-metrics-discovery intel-opencl-icd clinfo intel-gsc && \
+    apt-get install -y intel-media-va-driver-non-free libmfx-gen1 libvpl2 libvpl-tools libva-glx2 va-driver-all vainfo && \
+    apt-get install -y libze-dev intel-ocloc && \
+    apt-get update
 
 RUN curl -fsSL -v -o miniforge.sh -O https://github.com/conda-forge/miniforge/releases/download/25.1.1-0/Miniforge3-Linux-x86_64.sh && \
     bash miniforge.sh -b -p ./miniforge3 && \
@@ -36,38 +43,38 @@ RUN curl -fsSL -v -o miniforge.sh -O https://github.com/conda-forge/miniforge/re
     conda activate py${PYTHON_VERSION} && \
     conda install pip && \
     # Append environment activation to .bashrc for interactive shells
-    echo ". /home/sdp/miniforge3/bin/activate; conda activate py${PYTHON_VERSION}; . /opt/intel/oneapi/setvars.sh; cd /home/sdp" >> /home/sdp/.bashrc
+    echo ". /root/miniforge3/bin/activate; conda activate py${PYTHON_VERSION}; . /opt/intel/oneapi/setvars.sh; cd /root" >> /root/.bashrc
 
 USER root
 RUN apt-get update && apt install -y intel-ocloc
 
 # Switch back to user sdp
-USER sdp
+USER root
 
 RUN --mount=type=secret,id=github_token \
-    cd /home/sdp && \
-    . /home/sdp/miniforge3/bin/activate && \
+    cd /root && \
+    . /root/miniforge3/bin/activate && \
     conda activate py${PYTHON_VERSION} && \
     pip3 install torch==2.9.0+xpu torchao torchvision torchaudio pytorch-triton-xpu==3.5.0 --index-url https://download.pytorch.org/whl/xpu
 
 RUN --mount=type=secret,id=github_token \
-    cd /home/sdp && \
-    . /home/sdp/miniforge3/bin/activate && \
+    cd /root && \
+    . /root/miniforge3/bin/activate && \
     conda activate py${PYTHON_VERSION} && \
-    echo "Cloning ${SG_LANG_BRANCH} from ${SG_LANG_REPO}" && \
-    git clone --branch ${SG_LANG_BRANCH} --single-branch ${SG_LANG_REPO} && \
-    cd sglang && cd python && \
-    cp pyproject_xpu.toml pyproject.toml && \
-    pip install . && \
-    pip install xgrammar --no-deps && \
-    pip install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate --root-user-action=ignore && \
-    conda install libsqlite=3.48.0 -y && \
+    # echo "Cloning ${SG_LANG_BRANCH} from ${SG_LANG_REPO}"
+    # git clone --branch ${SG_LANG_BRANCH} --single-branch ${SG_LANG_REPO} && \
+    # cd sglang && cd python && \
+    # cp pyproject_xpu.toml pyproject.toml && \
+    # pip install . && \
+    # pip install xgrammar --no-deps && \
+    # pip install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate --root-user-action=ignore && \
+    # conda install libsqlite=3.48.0 -y && \
     # Add environment setup commands to .bashrc again (in case it was overwritten)
-    echo ". /home/sdp/miniforge3/bin/activate; conda activate py${PYTHON_VERSION}; cd /home/sdp" >> /home/sdp/.bashrc
+    echo ". /root/miniforge3/bin/activate; conda activate py${PYTHON_VERSION}; cd /root" >> /root/.bashrc
 
 # Use bash as default shell with initialization from .bashrc
 SHELL ["bash", "-c"]
 
 # Start an interactive bash shell with all environment set up
-USER sdp
-CMD ["bash", "-c", "source /home/sdp/.bashrc && exec bash"]
+USER root
+CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
