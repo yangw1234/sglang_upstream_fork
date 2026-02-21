@@ -1794,6 +1794,14 @@ class MRotaryEmbedding(RotaryEmbedding):
             rotary_mode=rotary_mode,
         )
         return query_out, key_out
+    
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_triton(positions, query, key)
 
     # Copied from https://github.com/huggingface/transformers/blob/c8e0e603de9b3d49161a15fe6e8ea84badfb5d02/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L1439
     @staticmethod

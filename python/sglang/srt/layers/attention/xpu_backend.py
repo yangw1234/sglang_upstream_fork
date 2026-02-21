@@ -374,6 +374,17 @@ class XPUAttentionBackend(AttentionBackend):
             metadata.page_table = (
                 metadata.page_table[:, self.strided_indices] // self.page_size
             )
+            if forward_batch.encoder_lens is not None:
+                encoder_strided_indices = torch.arange(
+                    0,
+                    metadata.encoder_page_table.shape[1],
+                    self.page_size,
+                    device=self.device,
+                )
+                metadata.encoder_page_table = (
+                    metadata.encoder_page_table[:, encoder_strided_indices]
+                    // self.page_size
+                )
 
         self.forward_metadata = metadata
 
@@ -496,6 +507,7 @@ class XPUAttentionBackend(AttentionBackend):
                 cache_seqlens = metadata.encoder_lens_int32
                 cu_seqlens_k = metadata.encoder_cu_seqlens_k
                 window_size = (-1, -1)
+                causal = False
 
             result = flash_attn_with_kvcache(
                 q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
@@ -757,7 +769,6 @@ class XPUAttentionBackend(AttentionBackend):
             )
 
             if layer.is_cross_attention:
-                # Always use non-chunked logic for cross-attention
                 o = flash_attn_with_kvcache(
                     q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
                     k_cache=key_cache,
@@ -775,6 +786,7 @@ class XPUAttentionBackend(AttentionBackend):
                     v_descale=v_descale,
                     **kwargs,
                 )
+                return o.view(-1, layer.tp_q_head_num * layer.head_dim)
             elif use_local_attn:
                 # Use chunked (local) attention batching for self-attention
                 o = flash_attn_with_kvcache(

@@ -1773,6 +1773,8 @@ class ServerArgs:
                     self.attention_backend = "trtllm_mha"
                 elif is_hip():
                     self.attention_backend = "aiter"
+                elif self.device == "xpu":
+                    self.attention_backend = "intel_xpu"
                 else:
                     self.attention_backend = (
                         "flashinfer" if is_flashinfer_available() else "triton"

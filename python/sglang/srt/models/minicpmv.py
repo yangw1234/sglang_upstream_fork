@@ -60,7 +60,7 @@ from sglang.srt.models.llama import LlamaConfig, LlamaForCausalLM
 from sglang.srt.models.qwen2 import Qwen2Config, Qwen2ForCausalLM
 from sglang.srt.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from sglang.srt.utils import add_prefix, flatten_nested_list
-
+from sglang.srt.utils import get_device
 RawImageType = Union[Image.Image, torch.Tensor]
 
 
@@ -283,7 +283,7 @@ class Resampler2_5(BaseResampler):
         )
 
         self.max_size = max_size
-        self._set_2d_pos_cache(self.max_size)
+        self._set_2d_pos_cache(self.max_size, device=get_device())
 
         self.apply(self._init_weights)
 
@@ -923,7 +923,7 @@ class MiniCPMV2_6(MiniCPMBaseModel):
                 prefix=prefix,
             )
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=get_device(), dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1081,7 +1081,7 @@ class MiniCPMV4_0(MiniCPMBaseModel):
                 prefix=prefix,
             )
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=get_device(), dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1243,7 +1243,7 @@ class MiniCPMV4_5(MiniCPMBaseModel):
                 prefix=prefix,
             )
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=get_device(), dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,

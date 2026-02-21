@@ -22,6 +22,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_npu,
+    is_xpu,
     print_info_once,
 )
 from sglang.srt.utils.multi_stream_utils import (
@@ -220,6 +221,8 @@ class VisionSdpaAttention(nn.Module):
         assert q.dim() == 3, q.shape
 
         s = q.shape[0] // bsz
+        seq_len = kwargs.get("seq_len", s)
+        cu_seqlens = resolve_seqlens(cu_seqlens, bsz, seq_len, device=q.device)
 
         # [b, 1, s, s]
         if attention_mask is None:
@@ -332,8 +335,8 @@ class VisionTritonAttention(nn.Module):
                 k,
                 v,
                 output,
-                cu_seqlens.cuda(),
-                seq_lens.cuda(),
+                cu_seqlens.to(q.device),
+                seq_lens.to(q.device),
                 max_seqlen,
                 is_causal=False,
             )
@@ -720,8 +723,10 @@ class VisionAttention(nn.Module):
         Priority: server args override > constructor arg > platform default.
 
         Platform defaults:
-        - CUDA: "triton_attn"
-        - Non-CUDA: "sdpa"
+        - CUDA: "triton_attn" (or "fa3" on sm_90)
+        - HIP: "aiter_attn" or "triton_attn"
+        - XPU: "triton_attn" (avoids SDPA device-lost issues on Intel GPU)
+        - Other: "sdpa"
         """
         override_backend = get_global_server_args().mm_attention_backend
         if override_backend is not None:
@@ -739,6 +744,8 @@ class VisionAttention(nn.Module):
                 backend = "aiter_attn"
             else:
                 backend = "triton_attn"
+        elif is_xpu():
+            backend = "triton_attn"
         else:
             backend = "sdpa"
         if backend == "fa3" and is_blackwell_supported():
