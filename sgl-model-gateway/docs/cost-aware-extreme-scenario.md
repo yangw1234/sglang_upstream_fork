@@ -275,41 +275,63 @@ short output=10 tokens.
 
 ### Charts
 
-#### End-to-End Latency by Policy (seconds, lower is better)
+#### Wall Time (seconds, lower is better)
 
 ```mermaid
 xychart-beta
-    title "End-to-End Latency Comparison"
-    x-axis ["P50 (all)", "Mean (all)", "P99 (all)", "Mean (long)", "P99 (long)"]
-    y-axis "Latency (seconds)" 0 --> 10
-    bar [2.063, 4.090, 9.134, 8.062, 9.136]
-    bar [0.136, 3.082, 8.199, 6.102, 8.200]
-    bar [0.173, 3.439, 8.824, 6.823, 8.827]
+    title "Total Wall Time"
+    x-axis ["cache_aware", "cost_aware", "round_robin"]
+    y-axis "Seconds" 0 --> 28
+    bar [25.89, 19.16, 21.82]
 ```
 
-> Legend: 1st bar = cache_aware, 2nd bar = cost_aware, 3rd bar = round_robin
-
-#### Wall Time and TTFT P99 (seconds, lower is better)
+#### Median (P50) End-to-End Latency (seconds, lower is better)
 
 ```mermaid
 xychart-beta
-    title "Wall Time & TTFT Comparison"
-    x-axis ["Wall Time", "TTFT P99", "Short e2e P95"]
-    y-axis "Seconds" 0 --> 27
-    bar [25.89, 0.415, 0.433]
-    bar [19.16, 0.079, 0.101]
-    bar [21.82, 0.070, 0.089]
+    title "All Requests — P50 Latency (cost_aware 15× better)"
+    x-axis ["cache_aware", "cost_aware", "round_robin"]
+    y-axis "Seconds" 0 --> 2.5
+    bar [2.063, 0.136, 0.173]
 ```
 
-> Legend: 1st bar = cache_aware, 2nd bar = cost_aware, 3rd bar = round_robin
+#### TTFT P99 (seconds, lower is better)
+
+```mermaid
+xychart-beta
+    title "Time to First Token — P99 (cost_aware 5× better)"
+    x-axis ["cache_aware", "cost_aware", "round_robin"]
+    y-axis "Seconds" 0 --> 0.5
+    bar [0.415, 0.079, 0.070]
+```
+
+#### Long-Output Task Mean Latency (seconds, lower is better)
+
+```mermaid
+xychart-beta
+    title "Long-Output (2000 tok) — Mean Latency"
+    x-axis ["cache_aware", "cost_aware", "round_robin"]
+    y-axis "Seconds" 0 --> 9
+    bar [8.062, 6.102, 6.823]
+```
+
+#### Short-Output Task P95 Latency (seconds, lower is better)
+
+```mermaid
+xychart-beta
+    title "Short-Output (10 tok) — P95 Latency (cost_aware 4× better)"
+    x-axis ["cache_aware", "cost_aware", "round_robin"]
+    y-axis "Seconds" 0 --> 0.5
+    bar [0.433, 0.101, 0.089]
+```
 
 #### Speedup of cost_aware over cache_aware
 
 ```mermaid
 xychart-beta
-    title "cost_aware Speedup over cache_aware (×)"
+    title "cost_aware Speedup over cache_aware (higher is better)"
     x-axis ["P50", "TTFT P99", "Short P95", "Wall Time", "Mean (all)", "Mean (long)", "P99 (long)"]
-    y-axis "Speedup factor" 0 --> 16
+    y-axis "Speedup (×)" 0 --> 16
     bar [15.2, 5.27, 4.29, 1.35, 1.33, 1.32, 1.11]
 ```
 
