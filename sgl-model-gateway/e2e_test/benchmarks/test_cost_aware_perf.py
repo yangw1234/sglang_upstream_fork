@@ -1,13 +1,13 @@
 """Cost-aware vs cache_aware extreme scenario benchmark.
 
-Scenario: "Prefix-Pinned Output Skew"
-  - 4 task types with distinct system prompts (prefixes)
-  - Tasks A,B produce LONG output (max_tokens=2000)
-  - Tasks C,D produce SHORT output (max_tokens=10)
+Scenario: "Prefix-Pinned Output Skew" (2-worker variant)
+  - 2 task types with distinct system prompts (prefixes)
+  - Task A produces LONG output (max_tokens=2000)
+  - Task B produces SHORT output (max_tokens=10)
   - cache_aware pins each prefix to one worker by cache affinity,
-    creating 2 saturated + 2 idle workers
+    leaving one worker saturated with long-decode and one idle
   - cost_aware redistributes long-output tasks by weighted load,
-    balancing decode work across all 4 workers
+    balancing decode work across both workers
 
 Run: pytest e2e_test/benchmarks/test_cost_aware_perf.py -v -s
 """
@@ -46,20 +46,6 @@ _PREFIX_A = (
 )
 
 _PREFIX_B = (
-    "You are a professional essay writer. Your task is to write a long, "
-    "detailed, and well-structured essay on the topic provided below. "
-    "Include an introduction, multiple body paragraphs with supporting "
-    "evidence, and a conclusion. The essay should be comprehensive.\n\n"
-    + "WRITING RULES:\n"
-    + "\n".join(
-        f"- Rule {i}: Follow writing convention #{i} which states that "
-        f"paragraphs should demonstrate rhetorical technique {i}."
-        for i in range(1, 81)
-    )
-    + "\n\nWrite an essay on the following topic:\n"
-)
-
-_PREFIX_C = (
     "You are a text classifier. Classify the following text into exactly "
     "one category. Respond with ONLY the category name, nothing else. "
     "Do not explain your reasoning. Just output the single category.\n\n"
@@ -72,33 +58,18 @@ _PREFIX_C = (
     + "\n\nClassify this text:\n"
 )
 
-_PREFIX_D = (
-    "You are a sentiment tagger. Tag the following text with exactly one "
-    "sentiment label. Respond with ONLY the label, nothing else. "
-    "Do not explain. Output a single word.\n\n"
-    + "SENTIMENT LABELS:\n"
-    + "\n".join(
-        f"- Label_{i}: Sentiment type {i} representing emotional state "
-        f"that corresponds to feeling category {i}."
-        for i in range(1, 81)
-    )
-    + "\n\nTag this text:\n"
-)
-
 # Task definitions: (prefix, max_tokens, task_name)
+# With 2 workers, cache_aware pins A→Worker0, B→Worker1.
+# Worker0 gets all long-decode work, Worker1 sits idle.
 TASKS = [
-    (_PREFIX_A, 2000, "code_review"),
-    (_PREFIX_B, 2000, "essay_writing"),
-    (_PREFIX_C, 10, "classification"),
-    (_PREFIX_D, 10, "sentiment_tag"),
+    (_PREFIX_A, 2000, "code_review"),   # LONG output
+    (_PREFIX_B, 10, "classification"),   # SHORT output
 ]
 
 # User messages — short, so the prefix dominates the input
 USER_MESSAGES = [
     "def fibonacci(n):\n    if n <= 1: return n\n    return fibonacci(n-1) + fibonacci(n-2)\n",
-    "The impact of artificial intelligence on modern healthcare systems.",
     "The quarterly earnings report showed a 15% increase in revenue driven by strong consumer demand in the electronics sector.",
-    "I absolutely loved the new restaurant downtown, the pasta was incredible and the service was outstanding.",
 ]
 
 
@@ -221,8 +192,8 @@ class ScenarioResult:
 # Traffic generator
 # ---------------------------------------------------------------------------
 
-NUM_REQUESTS_PER_TASK = 40  # 40 × 4 tasks = 160 total
-CONCURRENCY = 32
+NUM_REQUESTS_PER_TASK = 40  # 40 × 2 tasks = 80 total
+CONCURRENCY = 16
 
 
 async def _send_request(
@@ -389,11 +360,11 @@ def compare_results(
 
 
 @pytest.mark.e2e
-@pytest.mark.workers(count=4)
+@pytest.mark.workers(count=2)
 @pytest.mark.gateway(policy="cache_aware")
 @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
 class TestCacheAwareBaseline:
-    """Baseline: run the extreme scenario under cache_aware."""
+    """Baseline: run the extreme scenario under cache_aware (2 workers)."""
 
     def test_prefix_pinned_output_skew(self, setup_backend):
         _, model_path, client, gateway = setup_backend
@@ -407,7 +378,7 @@ class TestCacheAwareBaseline:
 
 
 @pytest.mark.e2e
-@pytest.mark.workers(count=4)
+@pytest.mark.workers(count=2)
 @pytest.mark.gateway(
     policy="cost_aware",
     extra_args=[
@@ -432,11 +403,11 @@ class TestCostAwareExtreme:
 
 
 @pytest.mark.e2e
-@pytest.mark.workers(count=4)
+@pytest.mark.workers(count=2)
 @pytest.mark.gateway(policy="round_robin")
 @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
 class TestRoundRobinBaseline:
-    """Baseline: round_robin for comparison (no cache, no cost awareness)."""
+    """Baseline: round_robin for comparison (no cache, no cost awareness, 2 workers)."""
 
     def test_prefix_pinned_output_skew(self, setup_backend):
         _, model_path, client, gateway = setup_backend
