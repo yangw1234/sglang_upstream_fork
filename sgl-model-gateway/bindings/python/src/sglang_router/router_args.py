@@ -39,6 +39,11 @@ class RouterArgs:
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
+    # Cost-aware policy config
+    w_prefill: int = 6
+    w_cache_read: int = 1
+    w_decode: int = 30
+    default_estimated_output_tokens: int = 256
     bucket_adjust_interval_secs: int = 5
     dp_aware: bool = False
     enable_igw: bool = False  # Enable IGW (Inter-Gateway) mode for multi-model support
@@ -256,6 +261,7 @@ class RouterArgs:
                 "manual",
                 "consistent_hashing",
                 "prefix_hash",
+                "cost_aware",
             ],
             help="Load balancing policy to use. In PD mode, this is used for both prefill and decode unless overridden",
         )
@@ -272,6 +278,7 @@ class RouterArgs:
                 "bucket",
                 "consistent_hashing",
                 "prefix_hash",
+                "cost_aware",
             ],
             help="Specific policy for prefill nodes in PD mode. If not specified, uses the main policy",
         )
@@ -287,6 +294,7 @@ class RouterArgs:
                 "manual",
                 "consistent_hashing",
                 "prefix_hash",
+                "cost_aware",
             ],
             help="Specific policy for decode nodes in PD mode. If not specified, uses the main policy",
         )
@@ -344,6 +352,30 @@ class RouterArgs:
             type=int,
             default=RouterArgs.max_payload_size,
             help="Maximum payload size in bytes",
+        )
+        routing_group.add_argument(
+            f"--{prefix}w-prefill",
+            type=int,
+            default=RouterArgs.w_prefill,
+            help="Cost weight per uncached prefill token (cost_aware policy, default: 6)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}w-cache-read",
+            type=int,
+            default=RouterArgs.w_cache_read,
+            help="Cost weight per cached prefill token (cost_aware policy, default: 1)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}w-decode",
+            type=int,
+            default=RouterArgs.w_decode,
+            help="Cost weight per decode/output token (cost_aware policy, default: 30)",
+        )
+        routing_group.add_argument(
+            f"--{prefix}default-estimated-output-tokens",
+            type=int,
+            default=RouterArgs.default_estimated_output_tokens,
+            help="Default estimated output tokens when not provided (cost_aware policy, default: 256)",
         )
         routing_group.add_argument(
             f"--{prefix}dp-aware",

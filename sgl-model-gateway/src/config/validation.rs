@@ -249,6 +249,38 @@ impl ConfigValidator {
                     });
                 }
             }
+            PolicyConfig::CostAware {
+                w_prefill,
+                w_cache_read,
+                w_decode: _,
+                default_estimated_output_tokens: _,
+                eviction_interval_secs,
+                max_tree_size,
+            } => {
+                if *w_cache_read > *w_prefill {
+                    return Err(ConfigError::InvalidValue {
+                        field: "w_cache_read".to_string(),
+                        value: w_cache_read.to_string(),
+                        reason: "Must be <= w_prefill".to_string(),
+                    });
+                }
+
+                if *eviction_interval_secs == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "eviction_interval_secs".to_string(),
+                        value: eviction_interval_secs.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
+                if *max_tree_size == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "max_tree_size".to_string(),
+                        value: max_tree_size.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }

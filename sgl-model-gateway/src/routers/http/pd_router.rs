@@ -816,6 +816,7 @@ impl PDRouter {
                     tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                     headers,
                     hash_ring,
+                    estimated_output_tokens: None,
                 },
             )
             .await

@@ -291,6 +291,32 @@ pub enum PolicyConfig {
         #[serde(default = "default_load_factor")]
         load_factor: f64,
     },
+
+    /// Cost-aware load balancing policy.
+    /// Combines cache affinity with cost-weighted load awareness.
+    /// Routes to the worker with the lowest effective score:
+    ///   score = existing_weighted_load - matched_chars × (w_prefill - w_cache_read)
+    #[serde(rename = "cost_aware")]
+    CostAware {
+        /// Cost weight per uncached prefill token (default: 6)
+        #[serde(default = "default_w_prefill")]
+        w_prefill: usize,
+        /// Cost weight per cached prefill token (default: 1)
+        #[serde(default = "default_w_cache_read")]
+        w_cache_read: usize,
+        /// Cost weight per decode/output token (default: 30)
+        #[serde(default = "default_w_decode")]
+        w_decode: usize,
+        /// Default estimated output tokens when not provided (default: 256)
+        #[serde(default = "default_estimated_output_tokens")]
+        default_estimated_output_tokens: usize,
+        /// Eviction interval for tree cleanup (seconds, default: 30)
+        #[serde(default = "default_cost_aware_eviction_interval")]
+        eviction_interval_secs: u64,
+        /// Max tree chars per tenant before LRU eviction (default: 10000)
+        #[serde(default = "default_cost_aware_max_tree_size")]
+        max_tree_size: usize,
+    },
 }
 
 fn default_prefix_token_count() -> usize {
@@ -309,6 +335,30 @@ fn default_manual_max_idle_secs() -> u64 {
     4 * 3600
 }
 
+fn default_w_prefill() -> usize {
+    6
+}
+
+fn default_w_cache_read() -> usize {
+    1
+}
+
+fn default_w_decode() -> usize {
+    30
+}
+
+fn default_estimated_output_tokens() -> usize {
+    256
+}
+
+fn default_cost_aware_eviction_interval() -> u64 {
+    30
+}
+
+fn default_cost_aware_max_tree_size() -> usize {
+    10000
+}
+
 impl PolicyConfig {
     pub fn name(&self) -> &'static str {
         match self {
@@ -320,6 +370,7 @@ impl PolicyConfig {
             PolicyConfig::Manual { .. } => "manual",
             PolicyConfig::ConsistentHashing => "consistent_hashing",
             PolicyConfig::PrefixHash { .. } => "prefix_hash",
+            PolicyConfig::CostAware { .. } => "cost_aware",
         }
     }
 }

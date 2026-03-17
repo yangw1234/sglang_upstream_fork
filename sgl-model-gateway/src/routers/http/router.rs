@@ -42,6 +42,28 @@ use crate::{
     },
 };
 
+/// Extract estimated output tokens from a typed request.
+///
+/// Priority:
+/// 1. `estimated_output_tokens` — explicit estimate from client
+/// 2. `max_completion_tokens` / `max_tokens` / `max_output_tokens` — upper bound
+/// 3. None — policy falls back to config default
+fn extract_estimated_output<T: serde::Serialize>(typed_req: &T) -> Option<usize> {
+    let value = serde_json::to_value(typed_req).ok()?;
+    value
+        .get("estimated_output_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .or_else(|| {
+            value
+                .get("max_completion_tokens")
+                .or_else(|| value.get("max_tokens"))
+                .or_else(|| value.get("max_output_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+        })
+}
+
 /// Regular router that uses injected load balancing policies
 pub struct Router {
     worker_registry: Arc<WorkerRegistry>,
@@ -129,13 +151,15 @@ impl Router {
         }
     }
 
-    /// Select worker for a specific model considering circuit breaker state
+    /// Select worker for a specific model considering circuit breaker state.
+    /// Returns the selected worker and an optional request cost for cost-aware load tracking.
     async fn select_worker_for_model(
         &self,
         model_id: Option<&str>,
         text: Option<&str>,
         headers: Option<&HeaderMap>,
-    ) -> Option<Arc<dyn Worker>> {
+        estimated_output_tokens: Option<usize>,
+    ) -> Option<(Arc<dyn Worker>, Option<usize>)> {
         let effective_model_id = if !self.enable_igw { None } else { model_id };
 
         // Get workers for the specified model O(1), filtered by connection mode
@@ -167,17 +191,20 @@ impl Router {
             .worker_registry
             .get_hash_ring(effective_model_id.unwrap_or(UNKNOWN_MODEL_ID));
 
+        let info = SelectWorkerInfo {
+            request_text: text,
+            tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
+            headers,
+            hash_ring,
+            estimated_output_tokens,
+        };
+
         let idx = policy
-            .select_worker(
-                &available,
-                &SelectWorkerInfo {
-                    request_text: text,
-                    tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
-                    headers,
-                    hash_ring,
-                },
-            )
+            .select_worker(&available, &info)
             .await?;
+
+        // Compute request cost for cost-aware policies
+        let request_cost = policy.compute_request_cost(&available, idx, &info);
 
         // Record worker selection metric (Layer 3)
         Metrics::record_worker_selection(
@@ -187,7 +214,7 @@ impl Router {
             policy.name(),
         );
 
-        Some(available[idx].clone())
+        Some((available[idx].clone(), request_cost))
     }
 
     pub async fn route_typed_request<T: GenerationRequest + serde::Serialize + Clone>(
@@ -278,11 +305,13 @@ impl Router {
         is_stream: bool,
         text: &str,
     ) -> Response {
-        let worker = match self
-            .select_worker_for_model(model_id, Some(text), headers)
+        let estimated_output_tokens = extract_estimated_output(typed_req);
+
+        let (worker, request_cost) = match self
+            .select_worker_for_model(model_id, Some(text), headers, estimated_output_tokens)
             .await
         {
-            Some(w) => w,
+            Some(result) => result,
             None => {
                 return error::service_unavailable(
                     "no_available_workers",
@@ -296,9 +325,14 @@ impl Router {
             None => self.policy_registry.get_default_policy(),
         };
 
-        let load_guard = ["cache_aware", "manual"]
-            .contains(&policy.name())
-            .then(|| WorkerLoadGuard::new(worker.clone(), headers));
+        let load_guard = if let Some(cost) = request_cost {
+            // Cost-aware policy: track full request cost in weighted load
+            Some(WorkerLoadGuard::with_cost(worker.clone(), headers, cost))
+        } else if ["cache_aware", "manual"].contains(&policy.name()) {
+            Some(WorkerLoadGuard::new(worker.clone(), headers))
+        } else {
+            None
+        };
 
         // Note: Using borrowed reference avoids heap allocation
         events::RequestSentEvent { url: worker.url() }.emit();

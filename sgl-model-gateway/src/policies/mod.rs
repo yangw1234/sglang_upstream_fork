@@ -13,6 +13,7 @@ use crate::core::{HashRing, Worker};
 mod bucket;
 mod cache_aware;
 mod consistent_hashing;
+mod cost_aware;
 mod factory;
 mod manual;
 mod power_of_two;
@@ -25,6 +26,7 @@ pub(crate) mod utils;
 pub use bucket::BucketPolicy;
 pub use cache_aware::CacheAwarePolicy;
 pub use consistent_hashing::ConsistentHashingPolicy;
+pub use cost_aware::{CostAwareConfig, CostAwarePolicy};
 pub use factory::PolicyFactory;
 pub use manual::{ManualConfig, ManualPolicy};
 pub use power_of_two::PowerOfTwoPolicy;
@@ -87,6 +89,18 @@ pub trait LoadBalancingPolicy: Send + Sync + Debug {
     /// This is useful for policies that maintain state (e.g., round-robin counters).
     fn reset(&self) {
         // Default: no-op for stateless policies
+    }
+
+    /// Compute the cost of placing a request on a specific worker.
+    /// Returns Some(cost) for cost-aware policies, None for others.
+    /// Called by the router after worker selection to create a weighted load guard.
+    fn compute_request_cost(
+        &self,
+        _workers: &[Arc<dyn Worker>],
+        _worker_idx: usize,
+        _info: &SelectWorkerInfo<'_>,
+    ) -> Option<usize> {
+        None
     }
 
     /// Get as Any for downcasting
@@ -171,6 +185,10 @@ pub struct SelectWorkerInfo<'a> {
     /// Pre-computed hash ring for O(log n) consistent hashing
     /// Built and cached by WorkerRegistry, passed through to avoid per-request rebuilds
     pub hash_ring: Option<Arc<HashRing>>,
+    /// Estimated output token count for cost-aware routing.
+    /// Priority: explicit `estimated_output_tokens` > `max_tokens` > config default.
+    /// When None, cost-aware policy falls back to config `default_estimated_output_tokens`.
+    pub estimated_output_tokens: Option<usize>,
 }
 
 #[cfg(test)]

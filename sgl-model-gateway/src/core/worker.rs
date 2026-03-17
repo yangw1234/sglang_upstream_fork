@@ -180,6 +180,18 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Reset the load counter to 0 (for sync/recovery)
     fn reset_load(&self) {}
 
+    /// Get the current cost-weighted load (sum of request costs for all in-flight requests).
+    /// Default: same as request count.
+    fn weighted_load(&self) -> usize {
+        self.load()
+    }
+
+    /// Increment weighted load by request cost.
+    fn increment_weighted_load(&self, _cost: usize) {}
+
+    /// Decrement weighted load by request cost.
+    fn decrement_weighted_load(&self, _cost: usize) {}
+
     /// Get the worker routing key load tracker
     fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad;
 
@@ -620,6 +632,7 @@ impl WorkerMetadata {
 pub struct BasicWorker {
     pub metadata: WorkerMetadata,
     pub load_counter: Arc<AtomicUsize>,
+    pub weighted_load_counter: Arc<AtomicUsize>,
     pub worker_routing_key_load: Arc<WorkerRoutingKeyLoad>,
     pub processed_counter: Arc<AtomicUsize>,
     pub healthy: Arc<AtomicBool>,
@@ -779,6 +792,22 @@ impl Worker for BasicWorker {
     fn reset_load(&self) {
         self.load_counter.store(0, Ordering::Relaxed);
         self.update_running_requests_metrics();
+    }
+
+    fn weighted_load(&self) -> usize {
+        self.weighted_load_counter.load(Ordering::Relaxed)
+    }
+
+    fn increment_weighted_load(&self, cost: usize) {
+        self.weighted_load_counter.fetch_add(cost, Ordering::Relaxed);
+    }
+
+    fn decrement_weighted_load(&self, cost: usize) {
+        self.weighted_load_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(cost))
+            })
+            .ok();
     }
 
     fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad {
@@ -1109,6 +1138,7 @@ impl Worker for DPAwareWorker {
 pub struct WorkerLoadGuard {
     worker: Arc<dyn Worker>,
     routing_key: Option<String>,
+    weighted_cost: Option<usize>,
 }
 
 impl WorkerLoadGuard {
@@ -1126,6 +1156,32 @@ impl WorkerLoadGuard {
         Self {
             worker,
             routing_key,
+            weighted_cost: None,
+        }
+    }
+
+    /// Constructor with cost-weighted load tracking.
+    /// `request_cost` is the full cost in cost-units, computed by the policy.
+    pub fn with_cost(
+        worker: Arc<dyn Worker>,
+        headers: Option<&http::HeaderMap>,
+        request_cost: usize,
+    ) -> Self {
+        use crate::routers::header_utils::extract_routing_key;
+
+        worker.increment_load();
+        worker.increment_weighted_load(request_cost);
+
+        let routing_key = extract_routing_key(headers).map(String::from);
+
+        if let Some(ref key) = routing_key {
+            worker.worker_routing_key_load().increment(key);
+        }
+
+        Self {
+            worker,
+            routing_key,
+            weighted_cost: Some(request_cost),
         }
     }
 }
@@ -1133,6 +1189,9 @@ impl WorkerLoadGuard {
 impl Drop for WorkerLoadGuard {
     fn drop(&mut self) {
         self.worker.decrement_load();
+        if let Some(cost) = self.weighted_cost {
+            self.worker.decrement_weighted_load(cost);
+        }
         if let Some(ref key) = self.routing_key {
             self.worker.worker_routing_key_load().decrement(key);
         }
@@ -2146,5 +2205,38 @@ mod tests {
         drop(guard2);
         assert_eq!(worker.load(), 0);
         assert_eq!(worker.worker_routing_key_load().value(), 0);
+    }
+
+    #[test]
+    fn test_weighted_load_guard_drop() {
+        use crate::core::BasicWorkerBuilder;
+        let worker: Arc<dyn Worker> = Arc::new(
+            BasicWorkerBuilder::new("http://test:8080")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        );
+
+        assert_eq!(worker.weighted_load(), 0);
+        assert_eq!(worker.load(), 0);
+
+        // Create guard with cost
+        let guard = WorkerLoadGuard::with_cost(worker.clone(), None, 5000);
+        assert_eq!(worker.load(), 1);
+        assert_eq!(worker.weighted_load(), 5000);
+
+        // Create another guard with different cost
+        let guard2 = WorkerLoadGuard::with_cost(worker.clone(), None, 3000);
+        assert_eq!(worker.load(), 2);
+        assert_eq!(worker.weighted_load(), 8000);
+
+        // Drop first guard — should decrement both load and weighted_load
+        drop(guard);
+        assert_eq!(worker.load(), 1);
+        assert_eq!(worker.weighted_load(), 3000);
+
+        // Drop second guard — everything back to zero
+        drop(guard2);
+        assert_eq!(worker.load(), 0);
+        assert_eq!(worker.weighted_load(), 0);
     }
 }

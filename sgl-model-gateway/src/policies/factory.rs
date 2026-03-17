@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use super::{
     BucketConfig, BucketPolicy, CacheAwareConfig, CacheAwarePolicy, ConsistentHashingPolicy,
-    LoadBalancingPolicy, ManualConfig, ManualPolicy, PowerOfTwoPolicy, PrefixHashConfig,
-    PrefixHashPolicy, RandomPolicy, RoundRobinPolicy,
+    CostAwareConfig, CostAwarePolicy, LoadBalancingPolicy, ManualConfig, ManualPolicy,
+    PowerOfTwoPolicy, PrefixHashConfig, PrefixHashPolicy, RandomPolicy, RoundRobinPolicy,
 };
 use crate::config::PolicyConfig;
 
@@ -70,6 +70,24 @@ impl PolicyFactory {
                 };
                 Arc::new(PrefixHashPolicy::new(config))
             }
+            PolicyConfig::CostAware {
+                w_prefill,
+                w_cache_read,
+                w_decode,
+                default_estimated_output_tokens,
+                eviction_interval_secs,
+                max_tree_size,
+            } => {
+                let config = CostAwareConfig {
+                    w_prefill: *w_prefill,
+                    w_cache_read: *w_cache_read,
+                    w_decode: *w_decode,
+                    default_estimated_output_tokens: *default_estimated_output_tokens,
+                    eviction_interval_secs: *eviction_interval_secs,
+                    max_tree_size: *max_tree_size,
+                };
+                Arc::new(CostAwarePolicy::with_config(config))
+            }
         }
     }
 
@@ -86,6 +104,7 @@ impl PolicyFactory {
                 Some(Arc::new(ConsistentHashingPolicy::new()))
             }
             "prefix_hash" | "prefixhash" => Some(Arc::new(PrefixHashPolicy::with_defaults())),
+            "cost_aware" | "costaware" => Some(Arc::new(CostAwarePolicy::new())),
             _ => None,
         }
     }
@@ -133,6 +152,16 @@ mod tests {
 
         let policy = PolicyFactory::create_from_config(&PolicyConfig::ConsistentHashing);
         assert_eq!(policy.name(), "consistent_hashing");
+
+        let policy = PolicyFactory::create_from_config(&PolicyConfig::CostAware {
+            w_prefill: 6,
+            w_cache_read: 1,
+            w_decode: 30,
+            default_estimated_output_tokens: 256,
+            eviction_interval_secs: 30,
+            max_tree_size: 10000,
+        });
+        assert_eq!(policy.name(), "cost_aware");
     }
 
     #[tokio::test]
@@ -151,6 +180,8 @@ mod tests {
         assert!(PolicyFactory::create_by_name("Manual").is_some());
         assert!(PolicyFactory::create_by_name("consistent_hashing").is_some());
         assert!(PolicyFactory::create_by_name("ConsistentHashing").is_some());
+        assert!(PolicyFactory::create_by_name("cost_aware").is_some());
+        assert!(PolicyFactory::create_by_name("CostAware").is_some());
         assert!(PolicyFactory::create_by_name("unknown").is_none());
     }
 }

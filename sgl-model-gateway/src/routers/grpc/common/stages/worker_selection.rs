@@ -175,6 +175,7 @@ impl WorkerSelectionStage {
                     tokens,
                     headers,
                     hash_ring,
+                    estimated_output_tokens: None,
                 },
             )
             .await?;
@@ -246,6 +247,7 @@ impl WorkerSelectionStage {
             tokens,
             headers,
             hash_ring,
+            estimated_output_tokens: None,
         };
         let prefill_idx = policy.select_worker(&available_prefill, &info).await?;
         let decode_idx = policy.select_worker(&available_decode, &info).await?;

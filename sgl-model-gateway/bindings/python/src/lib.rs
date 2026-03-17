@@ -15,6 +15,7 @@ pub enum PolicyType {
     Manual,
     ConsistentHashing,
     PrefixHash,
+    CostAware,
 }
 
 #[pyclass(eq)]
@@ -350,6 +351,11 @@ struct Router {
     max_idle_secs: u64,
     assignment_mode: String,
     max_payload_size: usize,
+    // Cost-aware policy config
+    w_prefill: usize,
+    w_cache_read: usize,
+    w_decode: usize,
+    default_estimated_output_tokens: usize,
     dp_aware: bool,
     api_key: Option<String>,
     log_dir: Option<String>,
@@ -471,6 +477,14 @@ impl Router {
                 PolicyType::PrefixHash => ConfigPolicyConfig::PrefixHash {
                     prefix_token_count: 256,
                     load_factor: 1.25,
+                },
+                PolicyType::CostAware => ConfigPolicyConfig::CostAware {
+                    w_prefill: self.w_prefill,
+                    w_cache_read: self.w_cache_read,
+                    w_decode: self.w_decode,
+                    default_estimated_output_tokens: self.default_estimated_output_tokens,
+                    eviction_interval_secs: self.eviction_interval_secs,
+                    max_tree_size: self.max_tree_size,
                 },
             }
         };
@@ -741,6 +755,10 @@ impl Router {
         max_idle_secs: u64,
         assignment_mode: String,
         max_payload_size: usize,
+        w_prefill: usize,
+        w_cache_read: usize,
+        w_decode: usize,
+        default_estimated_output_tokens: usize,
         dp_aware: bool,
         api_key: Option<String>,
         log_dir: Option<String>,
@@ -841,6 +859,10 @@ impl Router {
             max_idle_secs,
             assignment_mode,
             max_payload_size,
+            w_prefill,
+            w_cache_read,
+            w_decode,
+            default_estimated_output_tokens,
             dp_aware,
             api_key,
             log_dir,

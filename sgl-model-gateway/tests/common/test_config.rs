@@ -94,6 +94,29 @@ impl TestRouterConfig {
             .build_unchecked()
     }
 
+    /// Create a cost-aware config for routing tests
+    pub fn cost_aware(port: u16) -> RouterConfig {
+        RouterConfig::builder()
+            .regular_mode(vec![])
+            .policy(PolicyConfig::CostAware {
+                w_prefill: 6,
+                w_cache_read: 1,
+                w_decode: 30,
+                default_estimated_output_tokens: 256,
+                eviction_interval_secs: 60,
+                max_tree_size: 10000,
+            })
+            .host(defaults::HOST)
+            .port(port)
+            .max_payload_size(defaults::MAX_PAYLOAD_SIZE)
+            .request_timeout_secs(defaults::REQUEST_TIMEOUT_SECS)
+            .worker_startup_timeout_secs(defaults::WORKER_STARTUP_TIMEOUT_SECS)
+            .worker_startup_check_interval_secs(defaults::WORKER_STARTUP_CHECK_INTERVAL_SECS)
+            .max_concurrent_requests(defaults::MAX_CONCURRENT_REQUESTS)
+            .queue_timeout_secs(defaults::QUEUE_TIMEOUT_SECS)
+            .build_unchecked()
+    }
+
     /// Create a manual routing config (for sticky routing tests)
     pub fn manual(port: u16) -> RouterConfig {
         Self::manual_with_mode(port, ManualAssignmentMode::Random)
