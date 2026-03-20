@@ -73,24 +73,24 @@ Step 2 — Steady State (cache-hit routing):
 
 Step 3 — The Trap:
   Short tasks (C, D) complete in ~0.5s. Long tasks (A, B) take ~30s.
-  
+
   At t=1s:
     Worker 0: [A₁(running), A₂(running)]     — 2 heavy decode jobs, GPU saturated
     Worker 1: [C₁(done), C₂(done)]            — idle!
     Worker 2: [B₁(running), B₂(running)]      — 2 heavy decode jobs, GPU saturated
     Worker 3: [D₁(done), D₂(done)]            — idle!
-    
+
     Request counts: [2, 0, 2, 0] → imbalance detected! (2-0=2 < 32? NO imbalance!)
-    
+
     Actually: [2, 0, 2, 0] means max-min = 2, which is < 32 (abs_threshold)
     → cache_aware stays in CACHE mode → routes next A to Worker 0 again!
 
 Step 4 — Pile-Up:
   More requests arrive. Short tasks keep finishing fast, long tasks accumulate.
-  
+
   At t=5s with 32 concurrent requests:
     Worker 0: 8 long tasks queued (A)     — request count = 8
-    Worker 1: 0 tasks (C all finished)    — request count = 0  
+    Worker 1: 0 tasks (C all finished)    — request count = 0
     Worker 2: 8 long tasks queued (B)     — request count = 8
     Worker 3: 0 tasks (D all finished)    — request count = 0
 
@@ -99,7 +99,7 @@ Step 4 — Pile-Up:
 
 Step 5 — When Imbalance Finally Triggers:
   Only after 32+ long tasks accumulate on a single worker does cache_aware
-  switch to shortest-queue mode. By then, Workers 0,2 have deep queues 
+  switch to shortest-queue mode. By then, Workers 0,2 have deep queues
   → massive tail latency.
 
 RESULT with cache_aware:
@@ -117,9 +117,9 @@ Same traffic pattern. Same prefix assignment in Step 1.
 Step 2 — Cost-Aware Scoring:
   For each new request, score = existing_weighted_load - cache_savings
 
-  Cost of a long task (A/B):  uncached=250 tokens × 6 + cached=750 × 1 + output=2000 × 30 
+  Cost of a long task (A/B):  uncached=250 tokens × 6 + cached=750 × 1 + output=2000 × 30
                             = 1500 + 750 + 60000 = 62,250 cost-units
-  
+
   Cost of a short task (C/D): uncached=250 × 6 + cached=750 × 1 + output=10 × 30
                             = 1500 + 750 + 300 = 2,550 cost-units
 
@@ -136,7 +136,7 @@ Step 2 — Cost-Aware Scoring:
     Worker 3: 0 - 0 = 0                                      (no cache, but empty!)
 
   → Route A₂ to Worker 1 (score = 0, beats 47,250)!
-  
+
   The 15,000 cache savings on Worker 0 is DWARFED by the 62,250 existing load.
   cost_aware correctly decides: "it's cheaper to re-prefill the prompt on an idle
   worker than to queue behind existing decode work."
@@ -144,7 +144,7 @@ Step 2 — Cost-Aware Scoring:
 Step 3 — Balanced Compute:
   cost_aware distributes long tasks across all 4 workers:
     Worker 0: mix of A + C tasks
-    Worker 1: mix of A + C tasks  
+    Worker 1: mix of A + C tasks
     Worker 2: mix of B + D tasks
     Worker 3: mix of B + D tasks
 

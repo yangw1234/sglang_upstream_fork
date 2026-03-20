@@ -66,8 +66,8 @@ _PREFIX_B = (
 )
 
 TASKS = [
-    (_PREFIX_A, 2000, "code_review"),   # LONG output
-    (_PREFIX_B, 10, "classification"),   # SHORT output
+    (_PREFIX_A, 2000, "code_review"),  # LONG output
+    (_PREFIX_B, 10, "classification"),  # SHORT output
 ]
 
 USER_MESSAGES = [
@@ -82,6 +82,7 @@ CONCURRENCY = 16
 # ---------------------------------------------------------------------------
 # Result collection (same as test file)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RequestResult:
@@ -146,29 +147,65 @@ class ScenarioResult:
             "short_e2e_p95": self.percentile(short_e2e, 95),
             "short_e2e_p99": self.percentile(short_e2e, 99),
             "short_e2e_mean": statistics.mean(short_e2e) if short_e2e else 0,
-            "long_output_tokens_mean": statistics.mean(
-                [r.output_tokens for r in self.long_tasks]
-            ) if self.long_tasks else 0,
-            "short_output_tokens_mean": statistics.mean(
-                [r.output_tokens for r in self.short_tasks]
-            ) if self.short_tasks else 0,
+            "long_output_tokens_mean": (
+                statistics.mean([r.output_tokens for r in self.long_tasks])
+                if self.long_tasks
+                else 0
+            ),
+            "short_output_tokens_mean": (
+                statistics.mean([r.output_tokens for r in self.short_tasks])
+                if self.short_tasks
+                else 0
+            ),
         }
 
 
 def print_summary(s: dict):
     logger.info("=" * 72)
     logger.info("Policy: %s", s["policy"])
-    logger.info("Requests: %d total, %d ok, %d errors | wall=%.1fs", s["total"], s["ok"], s["errors"], s["wall_time"])
-    logger.info("ALL   e2e: p50=%.2fs  p95=%.2fs  p99=%.2fs  mean=%.2fs", s["all_e2e_p50"], s["all_e2e_p95"], s["all_e2e_p99"], s["all_e2e_mean"])
-    logger.info("ALL  ttft: p50=%.2fs  p95=%.2fs  p99=%.2fs", s["all_ttft_p50"], s["all_ttft_p95"], s["all_ttft_p99"])
-    logger.info("LONG  e2e: p50=%.2fs  p95=%.2fs  p99=%.2fs  mean=%.2fs  (avg out_tok=%.0f)", s["long_e2e_p50"], s["long_e2e_p95"], s["long_e2e_p99"], s["long_e2e_mean"], s["long_output_tokens_mean"])
-    logger.info("SHORT e2e: p50=%.2fs  p95=%.2fs  p99=%.2fs  mean=%.2fs  (avg out_tok=%.0f)", s["short_e2e_p50"], s["short_e2e_p95"], s["short_e2e_p99"], s["short_e2e_mean"], s["short_output_tokens_mean"])
+    logger.info(
+        "Requests: %d total, %d ok, %d errors | wall=%.1fs",
+        s["total"],
+        s["ok"],
+        s["errors"],
+        s["wall_time"],
+    )
+    logger.info(
+        "ALL   e2e: p50=%.2fs  p95=%.2fs  p99=%.2fs  mean=%.2fs",
+        s["all_e2e_p50"],
+        s["all_e2e_p95"],
+        s["all_e2e_p99"],
+        s["all_e2e_mean"],
+    )
+    logger.info(
+        "ALL  ttft: p50=%.2fs  p95=%.2fs  p99=%.2fs",
+        s["all_ttft_p50"],
+        s["all_ttft_p95"],
+        s["all_ttft_p99"],
+    )
+    logger.info(
+        "LONG  e2e: p50=%.2fs  p95=%.2fs  p99=%.2fs  mean=%.2fs  (avg out_tok=%.0f)",
+        s["long_e2e_p50"],
+        s["long_e2e_p95"],
+        s["long_e2e_p99"],
+        s["long_e2e_mean"],
+        s["long_output_tokens_mean"],
+    )
+    logger.info(
+        "SHORT e2e: p50=%.2fs  p95=%.2fs  p99=%.2fs  mean=%.2fs  (avg out_tok=%.0f)",
+        s["short_e2e_p50"],
+        s["short_e2e_p95"],
+        s["short_e2e_p99"],
+        s["short_e2e_mean"],
+        s["short_output_tokens_mean"],
+    )
     logger.info("=" * 72)
 
 
 # ---------------------------------------------------------------------------
 # Traffic generator
 # ---------------------------------------------------------------------------
+
 
 async def send_request(
     client: httpx.AsyncClient,
@@ -219,10 +256,23 @@ async def send_request(
                 output_tokens += 1
 
         e2e = time.monotonic() - t_start
-        return RequestResult(task_name=task_name, max_tokens=max_tokens, ttft=ttft, e2e_latency=e2e, output_tokens=output_tokens)
+        return RequestResult(
+            task_name=task_name,
+            max_tokens=max_tokens,
+            ttft=ttft,
+            e2e_latency=e2e,
+            output_tokens=output_tokens,
+        )
     except Exception as e:
         e2e = time.monotonic() - t_start
-        return RequestResult(task_name=task_name, max_tokens=max_tokens, ttft=ttft, e2e_latency=e2e, output_tokens=output_tokens, error=str(e))
+        return RequestResult(
+            task_name=task_name,
+            max_tokens=max_tokens,
+            ttft=ttft,
+            e2e_latency=e2e,
+            output_tokens=output_tokens,
+            error=str(e),
+        )
 
 
 async def run_workload(
@@ -243,9 +293,16 @@ async def run_workload(
 
     async def _throttled(client, task_idx):
         async with sem:
-            return await send_request(client, base_url, model, task_idx, use_estimated_output)
+            return await send_request(
+                client, base_url, model, task_idx, use_estimated_output
+            )
 
-    logger.info("Starting workload: policy=%s, %d requests, concurrency=%d", policy, len(requests), CONCURRENCY)
+    logger.info(
+        "Starting workload: policy=%s, %d requests, concurrency=%d",
+        policy,
+        len(requests),
+        CONCURRENCY,
+    )
     t0 = time.monotonic()
 
     async with httpx.AsyncClient() as client:
@@ -254,7 +311,9 @@ async def run_workload(
         result.results = list(completed)
     result.wall_time = time.monotonic() - t0
 
-    logger.info("Workload complete in %.1fs (%d requests)", result.wall_time, len(requests))
+    logger.info(
+        "Workload complete in %.1fs (%d requests)", result.wall_time, len(requests)
+    )
     print_summary(result.summary())
     return result
 
@@ -262,6 +321,7 @@ async def run_workload(
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
+
 
 def get_open_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -284,7 +344,9 @@ def wait_for_server(url: str, timeout: int = 300):
     raise TimeoutError(f"Server at {url} not ready after {timeout}s")
 
 
-def launch_sglang_worker(model: str, port: int, gpu_id: int, log_dir: str = "/tmp") -> subprocess.Popen:
+def launch_sglang_worker(
+    model: str, port: int, gpu_id: int, log_dir: str = "/tmp"
+) -> subprocess.Popen:
     """Launch an SGLang worker on a specific GPU."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -295,35 +357,61 @@ def launch_sglang_worker(model: str, port: int, gpu_id: int, log_dir: str = "/tm
         if key not in env and key.upper() not in env:
             pass  # Offline mode handles this
     cmd = [
-        sys.executable, "-m", "sglang.launch_server",
-        "--model-path", model,
-        "--port", str(port),
-        "--host", "0.0.0.0",
-        "--mem-fraction-static", "0.85",
+        sys.executable,
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        model,
+        "--port",
+        str(port),
+        "--host",
+        "0.0.0.0",
+        "--mem-fraction-static",
+        "0.85",
     ]
     logger.info("Launching worker on GPU %d, port %d: %s", gpu_id, port, model)
     stdout_f = open(f"{log_dir}/worker_gpu{gpu_id}.stdout.log", "w")
     stderr_f = open(f"{log_dir}/worker_gpu{gpu_id}.stderr.log", "w")
-    proc = subprocess.Popen(cmd, env=env, stdout=stdout_f, stderr=stderr_f, start_new_session=True)
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=stdout_f, stderr=stderr_f, start_new_session=True
+    )
     return proc
 
 
-def launch_router(worker_urls: list[str], model: str, port: int, policy: str, extra_args: list[str] | None = None, log_dir: str = "/tmp") -> subprocess.Popen:
+def launch_router(
+    worker_urls: list[str],
+    model: str,
+    port: int,
+    policy: str,
+    extra_args: list[str] | None = None,
+    log_dir: str = "/tmp",
+) -> subprocess.Popen:
     """Launch the sglang router."""
     cmd = [
-        sys.executable, "-m", "sglang_router.launch_router",
-        "--host", "0.0.0.0",
-        "--port", str(port),
-        "--model-path", model,
-        "--policy", policy,
-        "--worker-urls", *worker_urls,
+        sys.executable,
+        "-m",
+        "sglang_router.launch_router",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(port),
+        "--model-path",
+        model,
+        "--policy",
+        policy,
+        "--worker-urls",
+        *worker_urls,
     ]
     if extra_args:
         cmd.extend(extra_args)
-    logger.info("Launching router: policy=%s, port=%d, workers=%s", policy, port, worker_urls)
+    logger.info(
+        "Launching router: policy=%s, port=%d, workers=%s", policy, port, worker_urls
+    )
     stdout_f = open(f"{log_dir}/router_{policy}.stdout.log", "w")
     stderr_f = open(f"{log_dir}/router_{policy}.stderr.log", "w")
-    proc = subprocess.Popen(cmd, stdout=stdout_f, stderr=stderr_f, start_new_session=True)
+    proc = subprocess.Popen(
+        cmd, stdout=stdout_f, stderr=stderr_f, start_new_session=True
+    )
     return proc
 
 
@@ -344,15 +432,22 @@ def kill_proc_tree(proc: subprocess.Popen):
 # Main orchestration
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Cost-aware LB benchmark")
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--gpu0", type=int, default=1, help="GPU id for worker 0")
     parser.add_argument("--gpu1", type=int, default=2, help="GPU id for worker 1")
-    parser.add_argument("--policies", nargs="+", default=["cache_aware", "cost_aware", "round_robin"])
+    parser.add_argument(
+        "--policies", nargs="+", default=["cache_aware", "cost_aware", "round_robin"]
+    )
     parser.add_argument("--requests-per-task", type=int, default=NUM_REQUESTS_PER_TASK)
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
-    parser.add_argument("--skip-workers", action="store_true", help="Workers already running (provide --worker-urls)")
+    parser.add_argument(
+        "--skip-workers",
+        action="store_true",
+        help="Workers already running (provide --worker-urls)",
+    )
     parser.add_argument("--worker-urls", nargs="+", default=None)
     args = parser.parse_args()
 
@@ -390,13 +485,24 @@ def main():
             extra_args = []
             if policy == "cost_aware":
                 extra_args = [
-                    "--w-prefill", "6",
-                    "--w-cache-read", "1",
-                    "--w-decode", "30",
-                    "--default-estimated-output-tokens", "256",
+                    "--w-prefill",
+                    "6",
+                    "--w-cache-read",
+                    "1",
+                    "--w-decode",
+                    "30",
+                    "--default-estimated-output-tokens",
+                    "256",
                 ]
 
-            router_proc = launch_router(worker_urls, args.model, router_port, policy, extra_args, log_dir=log_dir)
+            router_proc = launch_router(
+                worker_urls,
+                args.model,
+                router_port,
+                policy,
+                extra_args,
+                log_dir=log_dir,
+            )
             router_url = f"http://127.0.0.1:{router_port}"
 
             try:
@@ -409,16 +515,29 @@ def main():
 
             # Short warmup — 2 requests per task
             logger.info("Warming up %s...", policy)
-            asyncio.run(run_workload(router_url, args.model, f"{policy}_warmup",
-                                     use_estimated_output=(policy == "cost_aware"),
-                                     num_requests_per_task=2, concurrency=2))
+            asyncio.run(
+                run_workload(
+                    router_url,
+                    args.model,
+                    f"{policy}_warmup",
+                    use_estimated_output=(policy == "cost_aware"),
+                    num_requests_per_task=2,
+                    concurrency=2,
+                )
+            )
 
             # Main run
             use_est = policy == "cost_aware"
-            result = asyncio.run(run_workload(router_url, args.model, policy,
-                                              use_estimated_output=use_est,
-                                              num_requests_per_task=num_rpt,
-                                              concurrency=concurrency))
+            result = asyncio.run(
+                run_workload(
+                    router_url,
+                    args.model,
+                    policy,
+                    use_estimated_output=use_est,
+                    num_requests_per_task=num_rpt,
+                    concurrency=concurrency,
+                )
+            )
             all_results[policy] = result
 
             # Shutdown router between policies to avoid tree contamination
@@ -441,14 +560,29 @@ def main():
                 return a / b if b > 0 else float("inf")
 
             logger.info("\n" + "-" * 72)
-            logger.info("IMPROVEMENT (cache_aware / cost_aware — >1.0 means cost_aware wins)")
+            logger.info(
+                "IMPROVEMENT (cache_aware / cost_aware — >1.0 means cost_aware wins)"
+            )
             logger.info("-" * 72)
-            logger.info("  long_e2e_p99:  %.2f×", ratio(ca["long_e2e_p99"], co["long_e2e_p99"]))
-            logger.info("  long_e2e_p95:  %.2f×", ratio(ca["long_e2e_p95"], co["long_e2e_p95"]))
-            logger.info("  long_e2e_mean: %.2f×", ratio(ca["long_e2e_mean"], co["long_e2e_mean"]))
-            logger.info("  all_e2e_p99:   %.2f×", ratio(ca["all_e2e_p99"], co["all_e2e_p99"]))
-            logger.info("  all_ttft_p99:  %.2f×", ratio(ca["all_ttft_p99"], co["all_ttft_p99"]))
-            logger.info("  wall_time:     %.2f×", ratio(ca["wall_time"], co["wall_time"]))
+            logger.info(
+                "  long_e2e_p99:  %.2f×", ratio(ca["long_e2e_p99"], co["long_e2e_p99"])
+            )
+            logger.info(
+                "  long_e2e_p95:  %.2f×", ratio(ca["long_e2e_p95"], co["long_e2e_p95"])
+            )
+            logger.info(
+                "  long_e2e_mean: %.2f×",
+                ratio(ca["long_e2e_mean"], co["long_e2e_mean"]),
+            )
+            logger.info(
+                "  all_e2e_p99:   %.2f×", ratio(ca["all_e2e_p99"], co["all_e2e_p99"])
+            )
+            logger.info(
+                "  all_ttft_p99:  %.2f×", ratio(ca["all_ttft_p99"], co["all_ttft_p99"])
+            )
+            logger.info(
+                "  wall_time:     %.2f×", ratio(ca["wall_time"], co["wall_time"])
+            )
             logger.info("-" * 72)
 
         # Save results to JSON

@@ -62,8 +62,8 @@ _PREFIX_B = (
 # With 2 workers, cache_aware pins A→Worker0, B→Worker1.
 # Worker0 gets all long-decode work, Worker1 sits idle.
 TASKS = [
-    (_PREFIX_A, 2000, "code_review"),   # LONG output
-    (_PREFIX_B, 10, "classification"),   # SHORT output
+    (_PREFIX_A, 2000, "code_review"),  # LONG output
+    (_PREFIX_B, 10, "classification"),  # SHORT output
 ]
 
 # User messages — short, so the prefix dominates the input
@@ -323,9 +323,7 @@ def run_workload_sync(
 # ---------------------------------------------------------------------------
 
 
-def compare_results(
-    cache_aware: ScenarioResult, cost_aware: ScenarioResult
-) -> dict:
+def compare_results(cache_aware: ScenarioResult, cost_aware: ScenarioResult) -> dict:
     """Compare two scenario results and return improvement ratios."""
     ca = cache_aware.summary()
     co = cost_aware.summary()
@@ -372,9 +370,9 @@ class TestCacheAwareBaseline:
         s = result.summary()
 
         # Sanity: most requests should succeed
-        assert s["errors"] <= s["total_requests"] * 0.05, (
-            f"Too many errors: {s['errors']}/{s['total_requests']}"
-        )
+        assert (
+            s["errors"] <= s["total_requests"] * 0.05
+        ), f"Too many errors: {s['errors']}/{s['total_requests']}"
 
 
 @pytest.mark.e2e
@@ -382,10 +380,14 @@ class TestCacheAwareBaseline:
 @pytest.mark.gateway(
     policy="cost_aware",
     extra_args=[
-        "--w-prefill", "6",
-        "--w-cache-read", "1",
-        "--w-decode", "30",
-        "--default-estimated-output-tokens", "256",
+        "--w-prefill",
+        "6",
+        "--w-cache-read",
+        "1",
+        "--w-decode",
+        "30",
+        "--default-estimated-output-tokens",
+        "256",
     ],
 )
 @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
@@ -397,9 +399,9 @@ class TestCostAwareExtreme:
         result = run_workload_sync(gateway.base_url, model_path, "cost_aware")
         s = result.summary()
 
-        assert s["errors"] <= s["total_requests"] * 0.05, (
-            f"Too many errors: {s['errors']}/{s['total_requests']}"
-        )
+        assert (
+            s["errors"] <= s["total_requests"] * 0.05
+        ), f"Too many errors: {s['errors']}/{s['total_requests']}"
 
 
 @pytest.mark.e2e
@@ -414,6 +416,6 @@ class TestRoundRobinBaseline:
         result = run_workload_sync(gateway.base_url, model_path, "round_robin")
         s = result.summary()
 
-        assert s["errors"] <= s["total_requests"] * 0.05, (
-            f"Too many errors: {s['errors']}/{s['total_requests']}"
-        )
+        assert (
+            s["errors"] <= s["total_requests"] * 0.05
+        ), f"Too many errors: {s['errors']}/{s['total_requests']}"
